@@ -1,0 +1,12 @@
+[package]
+name = "routing"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+futures = "0.3.28"
+normalization = { path = "../normalization" }
+discovery = { path = "../discovery" }
+rpc = { path = "../rpc" }
+rand = "0.8"

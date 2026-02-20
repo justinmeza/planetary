@@ -1,0 +1,11 @@
+[package]
+name = "discovery"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+normalization = { path = "../normalization" }
+rpc = { path = "../rpc" }
+tokio = { version = "1", features = ["full"] }
+rand = "0.8"
+futures = "0.3.28"

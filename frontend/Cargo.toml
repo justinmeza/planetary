@@ -1,0 +1,18 @@
+[package]
+name = "frontend"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+normalization = { path = "../normalization" }
+rpc = { path = "../rpc" }
+discovery = { path = "../discovery" }
+configuration = { path = "../configuration" }
+storage = { path = "../storage" }
+caching = { path = "../caching" }
+monitoring = { path = "../monitoring" }
+routing = { path = "../routing" }
+scheduling = { path = "../scheduling" }
+release = { path = "../release" }
+security = { path = "../security" }
+tokio = { version = "1", features = ["full"] }

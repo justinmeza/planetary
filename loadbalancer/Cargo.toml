@@ -1,0 +1,12 @@
+[package]
+name = "loadbalancer"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+discovery = { path = "../discovery" }
+monitoring = { path = "../monitoring" }
+normalization = { path = "../normalization" }
+rpc = { path = "../rpc" }
+tokio = { version = "1", features = ["full"] }
+rand = "0.8"

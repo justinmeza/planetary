@@ -1,0 +1,10 @@
+[package]
+name = "rpc"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+normalization = { path = "../normalization" }
+tokio = { version = "1", features = ["full"] }
+rand = "0.8"
+once_cell = "1.10.0"
