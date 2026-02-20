@@ -954,6 +954,9 @@ fn landing_page() -> String {
             all built from scratch and running right now.
             Read the chapters to understand how they work, then visit the
             <a href="/dashboard">system dashboard</a> to see them in action.
+            The <a href="https://github.com/justinmeza/planetary">source code</a>
+            is freely available &mdash; readers are encouraged to run the system
+            themselves and explore.
         </p>
         <input type="radio" name="idx" id="tab-index" checked class="tab-radio">
         <input type="radio" name="idx" id="tab-reverse" class="tab-radio">
