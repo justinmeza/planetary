@@ -268,6 +268,15 @@ fn book_page(title: &str, slug: &str, active_href: &str, chapter_content: &str) 
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{title} - The Planetary Scale Computer</title>
+    <meta name="description" content="{title} — The Planetary Scale Computer">
+    <link rel="canonical" href="https://p.jjm.net{active_href}">
+    <meta property="og:title" content="{title} - The Planetary Scale Computer">
+    <meta property="og:description" content="{title} — The Planetary Scale Computer">
+    <meta property="og:type" content="article">
+    <meta property="og:url" content="https://p.jjm.net{active_href}">
+    <meta property="og:site_name" content="The Planetary Scale Computer">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="{title} - The Planetary Scale Computer">
     <style>
         :root {{
             --bg: #fffff8;
@@ -753,6 +762,16 @@ fn landing_page() -> String {
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>The Planetary Scale Computer</title>
+    <meta name="description" content="A self-describing planetary scale computer. The book is served by the very systems it describes — microservices handling discovery, routing, configuration, caching, storage, and monitoring, all built from scratch in Rust.">
+    <link rel="canonical" href="https://p.jjm.net/">
+    <meta property="og:title" content="The Planetary Scale Computer">
+    <meta property="og:description" content="A self-describing planetary scale computer. The book is served by the very systems it describes — microservices handling discovery, routing, configuration, caching, storage, and monitoring, all built from scratch in Rust.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://p.jjm.net/">
+    <meta property="og:site_name" content="The Planetary Scale Computer">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="The Planetary Scale Computer">
+    <meta name="twitter:description" content="A self-describing planetary scale computer. The book is served by the very systems it describes.">
     <style>
         :root {{
             --bg: #fffff8;
@@ -1066,6 +1085,7 @@ fn wrap_dashboard(title: &str, nav_active: &str, body: &str) -> String {
 <head>
     <meta charset="utf-8">
     <title>{title} - Planetary Computer Dashboard</title>
+    <meta name="robots" content="noindex, nofollow">
     <style>
         :root {{
             --bg: #f5f5f5;
@@ -2320,6 +2340,28 @@ async fn page_consistency_post(post_body: &str) -> String {
     page_consistency().await
 }
 
+// ── SEO helpers ─────────────────────────────────────────────────────────────
+
+fn generate_sitemap() -> String {
+    let mut urls = vec!["/".to_string()];
+    for entry in book_nav_entries() {
+        if let NavEntry::Chapter(item) = entry {
+            urls.push(item.href.to_string());
+        }
+    }
+    let mut xml = String::from(r#"<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+"#);
+    for url in &urls {
+        xml.push_str(&format!(
+            "  <url><loc>https://p.jjm.net{}</loc></url>\n",
+            url
+        ));
+    }
+    xml.push_str("</urlset>\n");
+    xml
+}
+
 // ── Request routing ─────────────────────────────────────────────────────────
 
 async fn handle_request(
@@ -2651,6 +2693,10 @@ async fn handle_request(
             }
         }
 
+        // ── SEO: robots.txt and sitemap.xml ──
+        ("GET", "/robots.txt") => (200, "User-agent: *\nAllow: /\nDisallow: /dashboard\nDisallow: /api/\nSitemap: https://p.jjm.net/sitemap.xml\n".to_string()),
+        ("GET", "/sitemap.xml") => (200, generate_sitemap()),
+
         // ── Legacy redirects (old dashboard paths) ──
         ("GET", "/config") => (301, String::new()),
         ("GET", "/storage") => (301, String::new()),
@@ -2772,7 +2818,11 @@ async fn main() {
                 _ => "Error",
             };
 
-            let content_type = if path.starts_with("/api/") {
+            let content_type = if path == "/robots.txt" {
+                "text/plain; charset=utf-8"
+            } else if path == "/sitemap.xml" {
+                "application/xml; charset=utf-8"
+            } else if path.starts_with("/api/") {
                 "application/json"
             } else {
                 "text/html; charset=utf-8"
