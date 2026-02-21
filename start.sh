@@ -131,11 +131,11 @@ wait_for_port security 11100
 wait_for_port monitoring 10800
 wait_for_port configuration 10500
 wait_for_port storage 10600
-wait_for_port storage-2 10601
-wait_for_port storage-3 10602
+if [ "${STORAGE_REPLICAS:-3}" -ge 2 ]; then wait_for_port storage-2 10601; fi
+if [ "${STORAGE_REPLICAS:-3}" -ge 3 ]; then wait_for_port storage-3 10602; fi
 wait_for_port caching 10700
-wait_for_port caching-2 10701
-wait_for_port caching-3 10702
+if [ "${CACHING_REPLICAS:-3}" -ge 2 ]; then wait_for_port caching-2 10701; fi
+if [ "${CACHING_REPLICAS:-3}" -ge 3 ]; then wait_for_port caching-3 10702; fi
 wait_for_port routing 10300
 wait_for_port release 11000
 wait_for_port echo 10100
