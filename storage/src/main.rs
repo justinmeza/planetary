@@ -24,13 +24,23 @@ struct StorageState {
 }
 
 async fn get_peers(own_addr: &str) -> Vec<String> {
+    let mut peers: Vec<String> = Vec::new();
     let result = discovery::list(SYSTEM_NAME.to_string()).await;
-    result
-        .addresses
-        .split(';')
-        .filter(|s| !s.is_empty() && *s != own_addr)
-        .map(|s| s.to_string())
-        .collect()
+    for s in result.addresses.split(';') {
+        if !s.is_empty() && s != own_addr {
+            peers.push(s.to_string());
+        }
+    }
+    // Cross-region peers from env
+    if let Ok(static_peers) = std::env::var("STORAGE_PEERS") {
+        for s in static_peers.split(',') {
+            let s = s.trim();
+            if !s.is_empty() && s != own_addr && !peers.contains(&s.to_string()) {
+                peers.push(s.to_string());
+            }
+        }
+    }
+    peers
 }
 
 mod handlers {
@@ -220,8 +230,9 @@ async fn request_handler(request: Request, shared_state: Arc<Mutex<StorageState>
 
 #[tokio::main]
 async fn main() {
+    let host = std::env::var("BIND_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let addr = std::env::var("PORT")
-        .map(|p| format!("127.0.0.1:{}", p))
+        .map(|p| format!("{}:{}", host, p))
         .unwrap_or_else(|_| SYSTEM_ADDRESS.to_string());
 
     // Per-instance data directory based on port

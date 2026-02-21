@@ -2,3 +2,8 @@
 */target/
 storage_data*/
 .DS_Store
+region.env
+region.env.nyc
+region.env.sfo
+region.env.ams
+

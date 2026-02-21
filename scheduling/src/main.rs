@@ -195,17 +195,23 @@ const DEFAULT_FLEET: &[FleetEntry] = &[
     },
 ];
 
+fn get_replicas(name: &str, default: i32) -> i32 {
+    let key = format!("{}_REPLICAS", name.to_uppercase());
+    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
 fn bootstrap_fleet(state: &mut SchedulerState) {
     for entry in DEFAULT_FLEET {
+        let replicas = get_replicas(entry.name, entry.replicas);
         let spec = ServiceSpec {
             name: entry.name.to_string(),
             manifest_path: entry.manifest_path.to_string(),
             bin_name: entry.bin_name.to_string(),
-            desired_replicas: entry.replicas,
+            desired_replicas: replicas,
         };
 
         // Spawn instances with well-known ports
-        for i in 0..entry.replicas {
+        for i in 0..replicas {
             let port = entry.base_port + i as u16;
             if let Some(instance) = state.spawn_instance(&spec, port) {
                 state.instances.push(instance);

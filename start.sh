@@ -5,6 +5,21 @@ BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 export CARGO_TARGET_DIR="$BASE_DIR/target"
 PIDS=()
 
+# Region configuration (set per-droplet via /opt/tpc/region.env)
+if [ -f "$BASE_DIR/region.env" ]; then
+    set -a
+    . "$BASE_DIR/region.env"
+    set +a
+fi
+REGION="${REGION:-local}"
+if [ "$REGION" != "local" ]; then
+    export BIND_HOST=0.0.0.0
+    export STORAGE_REPLICAS="${STORAGE_REPLICAS:-1}"
+    export CACHING_REPLICAS="${CACHING_REPLICAS:-1}"
+    export ECHO_REPLICAS="${ECHO_REPLICAS:-1}"
+    export FRONTEND_REPLICAS="${FRONTEND_REPLICAS:-1}"
+fi
+
 kill_tree() {
     local pid=$1
     local sig=${2:-TERM}
