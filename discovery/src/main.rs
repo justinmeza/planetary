@@ -16,7 +16,6 @@ use tokio::time::{sleep, Duration, Instant};
 type Name = String;
 type Address = String;
 const CLEANUP_DURATION: Duration = Duration::from_secs(10);
-const SERVER_ADDRESS: &str = "127.0.0.1:10200";
 
 #[derive(Default)]
 pub struct Registry {
@@ -210,6 +209,9 @@ async fn request_handler(request: Request, shared_state: Arc<Mutex<Registry>>) -
 
 #[tokio::main]
 async fn main() {
+    let host = std::env::var("BIND_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let addr = format!("{}:10200", host);
+
     let registry = Arc::new(Mutex::new(Registry::default()));
 
     // Background cleanup task
@@ -280,8 +282,9 @@ async fn main() {
     //     let future: Pin<Box<dyn Future<Output = Response> + Send>> = Box::pin(request_handler(request, state));
     //     future
     // };
+    println!("Discovery service starting on {}", addr);
     server::start_server_with_state(
-        SERVER_ADDRESS,
+        &addr,
         |request, state| {
             Box::pin(request_handler(request, state))
                 as Pin<Box<dyn Future<Output = Response> + Send>>
