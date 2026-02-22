@@ -19,6 +19,10 @@ const BLACKHOLE_THRESHOLD: u32 = 10;
 const BLACKHOLE_WINDOW: Duration = Duration::from_secs(60);
 const BLACKHOLE_DURATION: Duration = Duration::from_secs(300);
 
+const SHED_THRESHOLD: f64 = 0.8;
+const MAX_CONNECTIONS_PER_BACKEND: usize = 100;
+const REGIONS: &[(&str, &str)] = &[("sfo", "10.0.0.1"), ("nyc", "10.0.0.2"), ("ams", "10.0.0.3")];
+
 struct TokenBucket {
     tokens: f64,
     last_refill: Instant,
@@ -50,6 +54,7 @@ struct Backend {
     address: String,
     healthy: bool,
     active_connections: usize,
+    local: bool,
 }
 
 struct LoadBalancer {
@@ -59,10 +64,12 @@ struct LoadBalancer {
     rate_limits: HashMap<IpAddr, TokenBucket>,
     blacklist: HashMap<IpAddr, Instant>,
     violations: HashMap<IpAddr, (u32, Instant)>,
+    drained_regions: Vec<String>,
+    own_region: String,
 }
 
 impl LoadBalancer {
-    fn new(strategy: String) -> Self {
+    fn new(strategy: String, own_region: String) -> Self {
         LoadBalancer {
             backends: Vec::new(),
             strategy,
@@ -70,6 +77,8 @@ impl LoadBalancer {
             rate_limits: HashMap::new(),
             blacklist: HashMap::new(),
             violations: HashMap::new(),
+            drained_regions: Vec::new(),
+            own_region,
         }
     }
 
@@ -119,23 +128,15 @@ impl LoadBalancer {
         });
     }
 
-    fn select_backend(&mut self) -> Option<usize> {
-        let healthy: Vec<usize> = self
-            .backends
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| b.healthy)
-            .map(|(i, _)| i)
-            .collect();
-
-        if healthy.is_empty() {
+    fn select_from(&mut self, candidates: &[usize]) -> Option<usize> {
+        if candidates.is_empty() {
             return None;
         }
 
         match self.strategy.as_str() {
             "least-connections" => {
-                let mut best = healthy[0];
-                for &i in &healthy {
+                let mut best = candidates[0];
+                for &i in candidates {
                     if self.backends[i].active_connections
                         < self.backends[best].active_connections
                     {
@@ -145,18 +146,18 @@ impl LoadBalancer {
                 Some(best)
             }
             "random" => {
-                let idx = rand::thread_rng().gen_range(0..healthy.len());
-                Some(healthy[idx])
+                let idx = rand::thread_rng().gen_range(0..candidates.len());
+                Some(candidates[idx])
             }
             "pick-2" => {
-                if healthy.len() == 1 {
-                    return Some(healthy[0]);
+                if candidates.len() == 1 {
+                    return Some(candidates[0]);
                 }
                 let mut rng = rand::thread_rng();
-                let a = healthy[rng.gen_range(0..healthy.len())];
+                let a = candidates[rng.gen_range(0..candidates.len())];
                 let mut b = a;
                 while b == a {
-                    b = healthy[rng.gen_range(0..healthy.len())];
+                    b = candidates[rng.gen_range(0..candidates.len())];
                 }
                 if self.backends[a].active_connections <= self.backends[b].active_connections {
                     Some(a)
@@ -168,9 +169,10 @@ impl LoadBalancer {
             _ => {
                 let start = self.next_index;
                 let total = self.backends.len();
+                // Find the first candidate at or after next_index
                 for offset in 0..total {
                     let idx = (start + offset) % total;
-                    if self.backends[idx].healthy {
+                    if candidates.contains(&idx) {
                         self.next_index = (idx + 1) % total;
                         return Some(idx);
                     }
@@ -180,18 +182,95 @@ impl LoadBalancer {
         }
     }
 
+    fn local_utilization(&self) -> f64 {
+        let local_healthy: Vec<usize> = self
+            .backends
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.healthy && b.local)
+            .map(|(i, _)| i)
+            .collect();
+        if local_healthy.is_empty() {
+            return 0.0;
+        }
+        let total_conns: usize = local_healthy.iter().map(|&i| self.backends[i].active_connections).sum();
+        total_conns as f64 / (local_healthy.len() * MAX_CONNECTIONS_PER_BACKEND) as f64
+    }
+
+    fn is_shedding(&self) -> bool {
+        let local_healthy: Vec<usize> = self
+            .backends
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.healthy && b.local)
+            .map(|(i, _)| i)
+            .collect();
+        if local_healthy.is_empty() {
+            return true;
+        }
+        self.local_utilization() >= SHED_THRESHOLD
+    }
+
+    fn select_backend(&mut self) -> Option<usize> {
+        // Filter out backends in drained regions
+        let eligible: Vec<usize> = self
+            .backends
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| {
+                if !b.healthy {
+                    return false;
+                }
+                let region = region_for_address(&b.address, &self.own_region);
+                !self.drained_regions.contains(&region)
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        if eligible.is_empty() {
+            return None;
+        }
+
+        let local_healthy: Vec<usize> = eligible.iter().copied().filter(|&i| self.backends[i].local).collect();
+        let remote_healthy: Vec<usize> = eligible.iter().copied().filter(|&i| !self.backends[i].local).collect();
+
+        // Calculate local utilization
+        let local_util = if local_healthy.is_empty() {
+            1.0 // force shedding if no local backends
+        } else {
+            let total_conns: usize = local_healthy.iter().map(|&i| self.backends[i].active_connections).sum();
+            total_conns as f64 / (local_healthy.len() * MAX_CONNECTIONS_PER_BACKEND) as f64
+        };
+
+        if local_util < SHED_THRESHOLD && !local_healthy.is_empty() {
+            // Route to local only
+            self.select_from(&local_healthy)
+        } else {
+            // Shedding: route to all eligible backends
+            let mut all = local_healthy;
+            all.extend(remote_healthy);
+            self.select_from(&all)
+        }
+    }
+
     fn status_json(&self) -> String {
         let mut entries = Vec::new();
         for b in &self.backends {
             entries.push(format!(
-                "{{\"address\":\"{}\",\"healthy\":{},\"active_connections\":{}}}",
-                b.address, b.healthy, b.active_connections
+                "{{\"address\":\"{}\",\"healthy\":{},\"active_connections\":{},\"local\":{}}}",
+                b.address, b.healthy, b.active_connections, b.local
             ));
         }
+        let drained: Vec<String> = self.drained_regions.iter().map(|r| format!("\"{}\"", r)).collect();
         format!(
-            "{{\"strategy\":\"{}\",\"backend_count\":{},\"backends\":[{}]}}",
+            "{{\"strategy\":\"{}\",\"backend_count\":{},\"shedding\":{},\"local_utilization\":{:.4},\"drained_regions\":[{}],\"own_region\":\"{}\",\"shed_threshold\":{},\"backends\":[{}]}}",
             self.strategy,
             self.backends.len(),
+            self.is_shedding(),
+            self.local_utilization(),
+            drained.join(","),
+            self.own_region,
+            SHED_THRESHOLD,
             entries.join(",")
         )
     }
@@ -205,6 +284,7 @@ impl LoadBalancer {
                     address: addr.clone(),
                     healthy: true,
                     active_connections: 0,
+                    local: is_local(addr),
                 });
             }
         }
@@ -212,6 +292,22 @@ impl LoadBalancer {
         // Remove stale backends (not in discovery anymore)
         self.backends.retain(|b| addresses.contains(&b.address));
     }
+}
+
+fn is_local(addr: &str) -> bool {
+    addr.starts_with("127.0.0.1")
+}
+
+fn region_for_address(addr: &str, own_region: &str) -> String {
+    if addr.starts_with("127.0.0.1") {
+        return own_region.to_string();
+    }
+    for &(region, ip) in REGIONS {
+        if addr.starts_with(ip) {
+            return region.to_string();
+        }
+    }
+    "unknown".to_string()
 }
 
 fn report_metric(metric: &str, value: i32) {
@@ -237,7 +333,8 @@ async fn main() {
         .unwrap_or_else(|_| LISTEN_ADDR.to_string());
 
     let strategy = std::env::var("STRATEGY").unwrap_or_else(|_| "round-robin".to_string());
-    let lb = Arc::new(Mutex::new(LoadBalancer::new(strategy)));
+    let own_region = std::env::var("REGION").unwrap_or_else(|_| "sfo".to_string());
+    let lb = Arc::new(Mutex::new(LoadBalancer::new(strategy, own_region)));
 
     // Background: refresh backends from discovery
     let refresh_lb = Arc::clone(&lb);
@@ -403,6 +500,98 @@ async fn main() {
                     resp_body
                 );
                 let _ = client.write_all(response.as_bytes()).await;
+                return;
+            }
+
+            if first_line.starts_with("POST /__lb_drain") {
+                if !client_ip.is_loopback() {
+                    let response = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 13\r\nConnection: close\r\n\r\n403 Forbidden";
+                    let _ = client.write_all(response).await;
+                    return;
+                }
+
+                let body = if let Some(idx) = request_str.find("\r\n\r\n") {
+                    request_str[idx + 4..].trim().to_string()
+                } else {
+                    String::new()
+                };
+
+                let region = body
+                    .split('&')
+                    .find_map(|pair| {
+                        let parts: Vec<&str> = pair.splitn(2, '=').collect();
+                        if parts.len() == 2 && parts[0] == "region" {
+                            Some(parts[1].to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+
+                if !region.is_empty() {
+                    let mut lb_guard = lb.lock().await;
+                    if !lb_guard.drained_regions.contains(&region) {
+                        lb_guard.drained_regions.push(region.clone());
+                        println!("Drained region: {}", region);
+                    }
+                    let drained: Vec<String> = lb_guard.drained_regions.iter().map(|r| format!("\"{}\"", r)).collect();
+                    let resp_body = format!("{{\"drained\":[{}]}}", drained.join(","));
+                    drop(lb_guard);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        resp_body.len(),
+                        resp_body
+                    );
+                    let _ = client.write_all(response.as_bytes()).await;
+                } else {
+                    let response = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 15\r\nConnection: close\r\n\r\n400 Bad Request";
+                    let _ = client.write_all(response).await;
+                }
+                return;
+            }
+
+            if first_line.starts_with("POST /__lb_undrain") {
+                if !client_ip.is_loopback() {
+                    let response = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 13\r\nConnection: close\r\n\r\n403 Forbidden";
+                    let _ = client.write_all(response).await;
+                    return;
+                }
+
+                let body = if let Some(idx) = request_str.find("\r\n\r\n") {
+                    request_str[idx + 4..].trim().to_string()
+                } else {
+                    String::new()
+                };
+
+                let region = body
+                    .split('&')
+                    .find_map(|pair| {
+                        let parts: Vec<&str> = pair.splitn(2, '=').collect();
+                        if parts.len() == 2 && parts[0] == "region" {
+                            Some(parts[1].to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+
+                if !region.is_empty() {
+                    let mut lb_guard = lb.lock().await;
+                    lb_guard.drained_regions.retain(|r| r != &region);
+                    println!("Undrained region: {}", region);
+                    let drained: Vec<String> = lb_guard.drained_regions.iter().map(|r| format!("\"{}\"", r)).collect();
+                    let resp_body = format!("{{\"drained\":[{}]}}", drained.join(","));
+                    drop(lb_guard);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        resp_body.len(),
+                        resp_body
+                    );
+                    let _ = client.write_all(response.as_bytes()).await;
+                } else {
+                    let response = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 15\r\nConnection: close\r\n\r\n400 Bad Request";
+                    let _ = client.write_all(response).await;
+                }
                 return;
             }
 

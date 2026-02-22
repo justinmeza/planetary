@@ -1780,6 +1780,49 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+fn extract_json_value(json: &str, key: &str) -> Option<String> {
+    let pattern = format!("\"{}\"", key);
+    let idx = json.find(&pattern)?;
+    let rest = &json[idx + pattern.len()..];
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix(':')?;
+    let rest = rest.trim_start();
+    // Find end: comma, }, or ]
+    let end = rest.find(|c: char| c == ',' || c == '}' || c == ']').unwrap_or(rest.len());
+    let val = rest[..end].trim();
+    if val.is_empty() { None } else { Some(val.to_string()) }
+}
+
+fn extract_json_array_strings(json: &str, key: &str) -> Vec<String> {
+    let pattern = format!("\"{}\"", key);
+    let idx = match json.find(&pattern) {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let rest = &json[idx + pattern.len()..];
+    let rest = rest.trim_start();
+    let rest = match rest.strip_prefix(':') {
+        Some(r) => r.trim_start(),
+        None => return Vec::new(),
+    };
+    let rest = match rest.strip_prefix('[') {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
+    let end = match rest.find(']') {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let inner = &rest[..end];
+    inner
+        .split(',')
+        .filter_map(|s| {
+            let s = s.trim().trim_matches('"');
+            if s.is_empty() { None } else { Some(s.to_string()) }
+        })
+        .collect()
+}
+
 // ── Security middleware ──────────────────────────────────────────────────────
 
 async fn require_admin(headers: &str) -> bool {
@@ -2128,29 +2171,55 @@ async fn page_loadbalancer() -> String {
 
     // Parse the JSON manually
     let strategy = extract_json_string(&status_json, "strategy").unwrap_or_else(|| "unknown".to_string());
-    let backend_count = extract_json_string(&status_json, "backend_count").unwrap_or_else(|| "0".to_string());
+    let backend_count = extract_json_value(&status_json, "backend_count").unwrap_or_else(|| "0".to_string());
+    let own_region = extract_json_string(&status_json, "own_region").unwrap_or_else(|| "unknown".to_string());
+    let shedding = extract_json_value(&status_json, "shedding").unwrap_or_else(|| "false".to_string()) == "true";
+    let local_util = extract_json_value(&status_json, "local_utilization").unwrap_or_else(|| "0".to_string());
+    let local_util_pct: f64 = local_util.parse::<f64>().unwrap_or(0.0) * 100.0;
+    let shed_threshold = extract_json_value(&status_json, "shed_threshold").unwrap_or_else(|| "0.8".to_string());
+    let shed_threshold_pct: f64 = shed_threshold.parse::<f64>().unwrap_or(0.8) * 100.0;
+    let drained_regions = extract_json_array_strings(&status_json, "drained_regions");
 
     // Parse backends array
     let mut backends_html = String::new();
-    if let Some(arr_start) = status_json.find("[") {
-        if let Some(arr_end) = status_json.rfind("]") {
-            let arr = &status_json[arr_start + 1..arr_end];
-            // Split by },{ to get individual backend entries
+    // Find the backends array (last [ in the JSON)
+    if let Some(arr_start) = status_json.find("\"backends\":[") {
+        let arr_offset = arr_start + "\"backends\":[".len();
+        if let Some(arr_end) = status_json[arr_offset..].rfind(']') {
+            let arr = &status_json[arr_offset..arr_offset + arr_end];
             for entry in arr.split("},{") {
                 let clean = entry.trim_start_matches('{').trim_end_matches('}');
                 let address = extract_json_string(clean, "address").unwrap_or_default();
                 let healthy = clean.contains("\"healthy\":true");
-                let active = extract_json_string(clean, "active_connections").unwrap_or_else(|| "0".to_string());
+                let is_local = clean.contains("\"local\":true");
+                let active = extract_json_value(clean, "active_connections").unwrap_or_else(|| "0".to_string());
 
                 let status_class = if healthy { "status-healthy" } else { "status-unhealthy" };
                 let status_text = if healthy { "healthy" } else { "unhealthy" };
 
+                let locality = if is_local {
+                    "local".to_string()
+                } else {
+                    // Determine remote region from address
+                    let remote_region = if address.starts_with("10.0.0.1") {
+                        "sfo"
+                    } else if address.starts_with("10.0.0.2") {
+                        "nyc"
+                    } else if address.starts_with("10.0.0.3") {
+                        "ams"
+                    } else {
+                        "remote"
+                    };
+                    format!("remote ({})", remote_region)
+                };
+
                 backends_html.push_str(&format!(
-                    "<tr><td>{}</td><td class=\"{}\">{}</td><td>{}</td></tr>\n",
+                    "<tr><td>{}</td><td class=\"{}\">{}</td><td>{}</td><td>{}</td></tr>\n",
                     html_escape(&address),
                     status_class,
                     status_text,
                     html_escape(&active),
+                    html_escape(&locality),
                 ));
             }
         }
@@ -2160,17 +2229,55 @@ async fn page_loadbalancer() -> String {
         "<div class=\"empty\">No backends registered yet. The load balancer refreshes from discovery every 5 seconds.</div>".to_string()
     } else {
         format!(
-            "<table><tr><th>Address</th><th>Health</th><th>Active Connections</th></tr>{}</table>",
+            "<table><tr><th>Address</th><th>Health</th><th>Active Connections</th><th>Locality</th></tr>{}</table>",
             backends_html
         )
     };
+
+    // Edge load balancing card
+    let shedding_indicator = if shedding {
+        "<span style=\"color:#e74c3c;font-weight:600;\">active</span>"
+    } else {
+        "<span style=\"color:#27ae60;\">inactive</span>"
+    };
+
+    let util_bar_color = if local_util_pct >= shed_threshold_pct { "#e74c3c" } else { "#27ae60" };
+
+    // Region drain controls
+    let all_regions = &[("sfo", "SFO"), ("nyc", "NYC"), ("ams", "AMS")];
+    let mut drain_rows = String::new();
+    for &(region_id, region_label) in all_regions {
+        let is_drained = drained_regions.iter().any(|r| r == region_id);
+        let is_own = region_id == own_region;
+        let own_label = if is_own { " (this region)" } else { "" };
+        let (status_class, status_text) = if is_drained {
+            ("status-unhealthy", "drained")
+        } else {
+            ("status-healthy", "active")
+        };
+        let action = if is_drained {
+            format!(
+                r#"<form method="POST" action="/dashboard/loadbalancer/undrain" style="display:inline;margin:0;"><input type="hidden" name="region" value="{}"><button type="submit" class="btn-sm" style="background:#27ae60;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;">Undrain</button></form>"#,
+                region_id
+            )
+        } else {
+            format!(
+                r#"<form method="POST" action="/dashboard/loadbalancer/drain" style="display:inline;margin:0;"><input type="hidden" name="region" value="{}"><button type="submit" class="btn-sm" style="background:#e74c3c;color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;">Drain</button></form>"#,
+                region_id
+            )
+        };
+        drain_rows.push_str(&format!(
+            "<tr><td>{}{}</td><td class=\"{}\">{}</td><td>{}</td></tr>\n",
+            region_label, own_label, status_class, status_text, action
+        ));
+    }
 
     let body = format!(
         r#"<div class="card">
     <h2>Load Balancer Status</h2>
     <div>
-        <div class="stat"><div class="label">Strategy</div><div class="value">{}</div></div>
-        <div class="stat"><div class="label">Backends</div><div class="value">{}</div></div>
+        <div class="stat"><div class="label">Strategy</div><div class="value">{strategy}</div></div>
+        <div class="stat"><div class="label">Backends</div><div class="value">{backend_count}</div></div>
     </div>
 </div>
 <div class="card">
@@ -2178,26 +2285,54 @@ async fn page_loadbalancer() -> String {
     <form method="POST" action="/dashboard/loadbalancer">
         <div><label>Strategy</label>
             <select name="strategy" style="padding:8px 12px;border:1px solid #ddd;border-radius:4px;font-size:14px;">
-                <option value="round-robin" {}>Round Robin</option>
-                <option value="least-connections" {}>Least Connections</option>
-                <option value="random" {}>Random</option>
-                <option value="pick-2" {}>Pick-2 (Power of Two)</option>
+                <option value="round-robin" {rr}>Round Robin</option>
+                <option value="least-connections" {lc}>Least Connections</option>
+                <option value="random" {rnd}>Random</option>
+                <option value="pick-2" {p2}>Pick-2 (Power of Two)</option>
             </select>
         </div>
         <button type="submit" class="btn-primary">Update Strategy</button>
     </form>
 </div>
 <div class="card">
+    <h2>Edge Load Balancing</h2>
+    <div>
+        <div class="stat"><div class="label">Region</div><div class="value">{own_region_upper}</div></div>
+        <div class="stat"><div class="label">Local Utilization</div><div class="value">{local_util_pct:.1}%</div></div>
+        <div class="stat"><div class="label">Shedding</div><div class="value">{shedding_indicator}</div></div>
+        <div class="stat"><div class="label">Shed Threshold</div><div class="value">{shed_threshold_pct:.0}%</div></div>
+    </div>
+    <div style="margin-top:12px;">
+        <div style="background:#eee;border-radius:4px;height:20px;overflow:hidden;">
+            <div style="background:{util_bar_color};height:100%;width:{util_bar_width}%;transition:width 0.3s;"></div>
+        </div>
+    </div>
+</div>
+<div class="card">
+    <h2>Region Drain Controls</h2>
+    <table>
+        <tr><th>Region</th><th>Status</th><th>Action</th></tr>
+        {drain_rows}
+    </table>
+</div>
+<div class="card">
     <h2>Backend Instances</h2>
-    {}
+    {table}
 </div>"#,
-        html_escape(&strategy),
-        html_escape(&backend_count),
-        if strategy == "round-robin" { "selected" } else { "" },
-        if strategy == "least-connections" { "selected" } else { "" },
-        if strategy == "random" { "selected" } else { "" },
-        if strategy == "pick-2" { "selected" } else { "" },
-        table,
+        strategy = html_escape(&strategy),
+        backend_count = html_escape(&backend_count),
+        rr = if strategy == "round-robin" { "selected" } else { "" },
+        lc = if strategy == "least-connections" { "selected" } else { "" },
+        rnd = if strategy == "random" { "selected" } else { "" },
+        p2 = if strategy == "pick-2" { "selected" } else { "" },
+        own_region_upper = html_escape(&own_region.to_uppercase()),
+        local_util_pct = local_util_pct,
+        shedding_indicator = shedding_indicator,
+        shed_threshold_pct = shed_threshold_pct,
+        util_bar_color = util_bar_color,
+        util_bar_width = local_util_pct.min(100.0),
+        drain_rows = drain_rows,
+        table = table,
     );
 
     wrap_dashboard("Load Balancer", "Load Balancer", &body)
@@ -2254,6 +2389,52 @@ async fn post_lb_strategy(strategy: &str) -> String {
             let body = format!("strategy={}", strategy);
             let request = format!(
                 "POST /__lb_strategy HTTP/1.1\r\nHost: 127.0.0.1:8080\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            if stream.write_all(request.as_bytes()).await.is_err() {
+                return "ERROR".to_string();
+            }
+            let mut buf = vec![0u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        }
+        Err(_) => "ERROR".to_string(),
+    }
+}
+
+async fn post_lb_drain(region: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    match TcpStream::connect(LOADBALANCER_ADDR).await {
+        Ok(mut stream) => {
+            let body = format!("region={}", region);
+            let request = format!(
+                "POST /__lb_drain HTTP/1.1\r\nHost: 127.0.0.1:8080\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            if stream.write_all(request.as_bytes()).await.is_err() {
+                return "ERROR".to_string();
+            }
+            let mut buf = vec![0u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        }
+        Err(_) => "ERROR".to_string(),
+    }
+}
+
+async fn post_lb_undrain(region: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    match TcpStream::connect(LOADBALANCER_ADDR).await {
+        Ok(mut stream) => {
+            let body = format!("region={}", region);
+            let request = format!(
+                "POST /__lb_undrain HTTP/1.1\r\nHost: 127.0.0.1:8080\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             );
@@ -2816,6 +2997,28 @@ async fn handle_request(
                 (403, forbidden_page())
             } else {
                 (200, page_loadbalancer_post(body).await)
+            }
+        }
+        ("POST", "/dashboard/loadbalancer/drain") => {
+            if !require_admin(headers).await {
+                (403, forbidden_page())
+            } else {
+                let form = parse_form(body);
+                if let Some(region) = form.get("region") {
+                    let _ = post_lb_drain(region).await;
+                }
+                (200, page_loadbalancer().await)
+            }
+        }
+        ("POST", "/dashboard/loadbalancer/undrain") => {
+            if !require_admin(headers).await {
+                (403, forbidden_page())
+            } else {
+                let form = parse_form(body);
+                if let Some(region) = form.get("region") {
+                    let _ = post_lb_undrain(region).await;
+                }
+                (200, page_loadbalancer().await)
             }
         }
         ("GET", "/dashboard/consistency") => (200, page_consistency().await),

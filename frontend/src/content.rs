@@ -3740,6 +3740,94 @@ the pool while a request is in flight.  This bookkeeping is the foundation
 that makes load-aware strategies like least-connections and pick-2
 effective.</p>
 
+<h2>Edge Load Balancing</h2>
+
+<p><span class="newthought">Every data center</span> in our system is both an edge
+and an origin.  Each region (SFO, NYC, AMS) runs the full stack &mdash;
+frontends, services, storage &mdash; with a gateway load balancer at the entry
+point.  With <a href="/chapter/discovery" class="sys" style="color:#F7B731">federated
+discovery</a>, calling <code>discovery::list("frontend")</code> returns both local
+backends (<code>127.0.0.1:808x</code>) and remote backends from other regions
+(<code>10.0.0.2:808x</code>, <code>10.0.0.3:808x</code>).  The load balancer uses this
+information to make intelligent routing decisions.</p>
+
+<h3>Local Preference</h3>
+
+<p>Under normal load, the load balancer routes exclusively to local backends.
+A request entering the SFO gateway is served by SFO frontends, keeping
+latency minimal.  Each backend is classified at discovery time:</p>
+
+<span class="sidenote">The <code>local</code> flag is set when a backend is first
+added from discovery results.  Local addresses start with
+<code>127.0.0.1</code>; everything else is remote.</span>
+
+<pre class="code-loadbalancer"><code>struct Backend {
+    address: String,
+    healthy: bool,
+    active_connections: usize,
+    local: bool,
+}
+
+fn is_local(addr: &amp;str) -&gt; bool {
+    addr.starts_with("127.0.0.1")
+}</code></pre>
+
+<h3>Utilization-Based Shedding</h3>
+
+<p>When local backends approach capacity, the load balancer begins
+<em>shedding</em> traffic to remote regions.  The threshold is based on
+connection utilization: when active connections across local backends
+exceed 80% of maximum capacity, remote backends are added to the
+selection pool:</p>
+
+<pre class="code-loadbalancer"><code>// Calculate local utilization
+let local_util = total_local_connections as f64
+    / (local_count * MAX_CONNECTIONS_PER_BACKEND) as f64;
+
+if local_util &lt; SHED_THRESHOLD &amp;&amp; !local_healthy.is_empty() {
+    // Route to local backends only
+    self.select_from(&amp;local_healthy)
+} else {
+    // Shedding: include remote backends
+    self.select_from(&amp;all_eligible)
+}</code></pre>
+
+<p>Once shedding activates, the configured strategy (round-robin,
+least-connections, pick-2) distributes requests across the combined pool
+of local and remote backends.  As local utilization drops below the
+threshold, traffic returns to local-only routing automatically.</p>
+
+<h3>Manual Drain</h3>
+
+<p>The <a href="/dashboard/loadbalancer">dashboard</a> exposes drain and undrain
+controls per region.  Draining a region excludes all its backends from
+selection &mdash; useful for rolling deployments or planned maintenance.
+The drain filter runs before any strategy logic:</p>
+
+<pre class="code-loadbalancer"><code>// Filter out backends in drained regions
+let eligible: Vec&lt;usize&gt; = self.backends.iter()
+    .enumerate()
+    .filter(|(_, b)| {
+        let region = region_for_address(&amp;b.address, &amp;self.own_region);
+        !self.drained_regions.contains(&amp;region)
+    })
+    .map(|(i, _)| i)
+    .collect();</code></pre>
+
+<span class="sidenote">Drain state is held in memory.  A restart clears
+all drains, which is the correct behavior: if the LB restarts, all
+regions should start active.</span>
+
+<h3>Latency Trade-offs</h3>
+
+<p>Shedding to a remote region adds cross-region round-trip time: roughly
+74ms between SFO and NYC, 164ms between SFO and AMS.  This is a
+deliberate trade-off.  A request served in 164ms is better than a
+request dropped because local backends are saturated.  The shedding
+threshold (80%) provides a buffer &mdash; local backends still have 20%
+headroom for in-flight requests while remote backends absorb the
+overflow.</p>
+
 <h2>Service-Level Load Balancing</h2>
 
 <p>Load balancing also happens inside the system.  The
