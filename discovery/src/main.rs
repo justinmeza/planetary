@@ -1,9 +1,10 @@
 use discovery::{
-    ListArgs, ListResult, QueryArgs, QueryResult, RegisterArgs, LIST_PROCEDURE, QUERY_PROCEDURE,
+    FederatedRegisterArgs, ListArgs, ListResult, QueryArgs, QueryResult, RegisterArgs,
+    FEDERATED_REGISTER_PROCEDURE, LIST_LOCAL_PROCEDURE, LIST_PROCEDURE, QUERY_PROCEDURE,
     REGISTER_PROCEDURE,
 };
 use rand::seq::SliceRandom;
-use rpc::{server, Request, Response};
+use rpc::{client, server, Request, Response};
 use std::collections::{HashMap, HashSet};
 // use std::sync::{Arc, Mutex};
 use std::future::Future;
@@ -21,6 +22,8 @@ const SERVER_ADDRESS: &str = "127.0.0.1:10200";
 pub struct Registry {
     registry: HashMap<Name, Vec<Address>>,
     last_ping: HashMap<Address, Instant>,
+    federated: HashMap<Name, Vec<Address>>,
+    federated_ping: HashMap<Address, Instant>,
 }
 
 impl Registry {
@@ -42,8 +45,29 @@ impl Registry {
         self.registry.get(name)?.choose(&mut rand::thread_rng())
     }
 
-    // Return all addresses for a given name
+    // Return all addresses for a given name (local + federated, deduped)
     fn get_all_addresses(&self, name: &Name) -> Vec<&Address> {
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+        if let Some(addrs) = self.registry.get(name) {
+            for addr in addrs {
+                if seen.insert(addr) {
+                    result.push(addr);
+                }
+            }
+        }
+        if let Some(addrs) = self.federated.get(name) {
+            for addr in addrs {
+                if seen.insert(addr) {
+                    result.push(addr);
+                }
+            }
+        }
+        result
+    }
+
+    // Return only locally-registered addresses for a given name
+    fn get_local_addresses(&self, name: &Name) -> Vec<&Address> {
         self.registry
             .get(name)
             .map(|addrs| addrs.iter().collect())
@@ -66,6 +90,38 @@ impl Registry {
                 v.retain(|a| a != &address);
                 !v.is_empty()
             });
+        }
+    }
+
+    // Remove stale federated entries based on the last ping time
+    fn cleanup_stale_federated(&mut self) {
+        let now = Instant::now();
+        let stale_addresses: HashSet<_> = self
+            .federated_ping
+            .iter()
+            .filter(|&(_, time)| now.duration_since(*time) > CLEANUP_DURATION)
+            .map(|(address, _)| address.clone())
+            .collect();
+
+        for address in stale_addresses {
+            self.federated_ping.remove(&address);
+            self.federated.retain(|_, v| {
+                v.retain(|a| a != &address);
+                !v.is_empty()
+            });
+        }
+    }
+
+    // Register an address from a federated peer
+    fn federated_register(&mut self, name: Name, address: Address) {
+        if let Some(time) = self.federated_ping.get_mut(&address) {
+            *time = Instant::now();
+        } else {
+            self.federated
+                .entry(name)
+                .or_insert_with(Vec::new)
+                .push(address.clone());
+            self.federated_ping.insert(address, Instant::now());
         }
     }
 }
@@ -115,6 +171,27 @@ mod handlers {
             payload: result.serialize(),
         }
     }
+
+    pub async fn federated_register(payload: &str, registry: &mut Registry) -> Response {
+        let args =
+            FederatedRegisterArgs::deserialize(&payload).expect("Failed to deserialize payload");
+        registry.federated_register(args.name, args.address);
+        Response {
+            payload: "OK".to_string(),
+        }
+    }
+
+    pub async fn list_local(payload: &str, registry: &mut Registry) -> Response {
+        let args = ListArgs::deserialize(&payload).expect("Failed to deserialize payload");
+        let addresses = registry.get_local_addresses(&args.name);
+        let joined: Vec<String> = addresses.iter().map(|a| a.to_string()).collect();
+        let result = ListResult {
+            addresses: joined.join(";"),
+        };
+        Response {
+            payload: result.serialize(),
+        }
+    }
 }
 
 async fn request_handler(request: Request, shared_state: Arc<Mutex<Registry>>) -> Response {
@@ -123,6 +200,8 @@ async fn request_handler(request: Request, shared_state: Arc<Mutex<Registry>>) -
         REGISTER_PROCEDURE => handlers::register(&request.payload, &mut registry).await,
         QUERY_PROCEDURE => handlers::query(&request.payload, &mut registry).await,
         LIST_PROCEDURE => handlers::list(&request.payload, &mut registry).await,
+        FEDERATED_REGISTER_PROCEDURE => handlers::federated_register(&request.payload, &mut registry).await,
+        LIST_LOCAL_PROCEDURE => handlers::list_local(&request.payload, &mut registry).await,
         _ => Response {
             payload: "Unknown procedure".to_string(),
         },
@@ -139,8 +218,61 @@ async fn main() {
         loop {
             sleep(CLEANUP_DURATION).await;
             println!("Cleaning registry");
-            cleanup_registry.lock().await.cleanup_stale();
-            println!("{:?}", cleanup_registry.lock().await.registry);
+            let mut reg = cleanup_registry.lock().await;
+            reg.cleanup_stale();
+            reg.cleanup_stale_federated();
+            println!("{:?}", reg.registry);
+        }
+    });
+
+    // Federation background task
+    let federation_registry = Arc::clone(&registry);
+    tokio::spawn(async move {
+        let peers_str = std::env::var("DISCOVERY_PEERS").unwrap_or_default();
+        if peers_str.is_empty() {
+            println!("No DISCOVERY_PEERS configured, federation disabled");
+            return;
+        }
+        let bind_host = std::env::var("BIND_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let peers: Vec<String> = peers_str.split(',').map(|s| s.trim().to_string()).collect();
+        println!("Federation enabled with peers: {:?}", peers);
+
+        loop {
+            sleep(Duration::from_secs(5)).await;
+
+            // Collect all locally-registered (name, address) pairs
+            let entries: Vec<(String, String)> = {
+                let reg = federation_registry.lock().await;
+                let mut entries = Vec::new();
+                for (name, addrs) in &reg.registry {
+                    for addr in addrs {
+                        entries.push((name.clone(), addr.clone()));
+                    }
+                }
+                entries
+            };
+
+            for (name, addr) in &entries {
+                // Rewrite 127.0.0.1 to BIND_HOST for cross-region reachability
+                let rewritten_addr = if addr.contains("127.0.0.1") {
+                    addr.replace("127.0.0.1", &bind_host)
+                } else {
+                    addr.clone()
+                };
+
+                let args = FederatedRegisterArgs {
+                    name: name.clone(),
+                    address: rewritten_addr,
+                };
+
+                for peer in &peers {
+                    let request = Request {
+                        procedure_id: FEDERATED_REGISTER_PROCEDURE,
+                        payload: args.serialize(),
+                    };
+                    let _ = client::send_request(&peer, request).await;
+                }
+            }
         }
     });
 

@@ -213,26 +213,27 @@ fn book_nav_entries() -> Vec<NavEntry> {
         NavEntry::Chapter(NavItem { href: "/chapter/load-balancing", label: "21. Load Balancing", color: "#1B998B" }),
         NavEntry::Chapter(NavItem { href: "/chapter/consistency", label: "22. Consistency", color: "#A855F7" }),
         NavEntry::Chapter(NavItem { href: "/chapter/placement", label: "23. Placement", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/traffic", label: "24. Traffic", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/faults", label: "25. Faults", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/outages", label: "26. Outages", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/global-distribution", label: "24. Global Distribution", color: "#10B981" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/traffic", label: "25. Traffic", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/faults", label: "26. Faults", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/outages", label: "27. Outages", color: "#555" }),
         NavEntry::Part("Part IV: Infrastructure"),
-        NavEntry::Chapter(NavItem { href: "/chapter/resources", label: "27. Resources", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/servers", label: "28. Servers", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/buildings", label: "29. Buildings", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/network", label: "30. Network", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/power", label: "31. Power", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/infra-management", label: "32. Management", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/maintenance", label: "33. Maintenance", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/edges", label: "34. Edges", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/resources", label: "28. Resources", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/servers", label: "29. Servers", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/buildings", label: "30. Buildings", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/network", label: "31. Network", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/power", label: "32. Power", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/infra-management", label: "33. Management", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/maintenance", label: "34. Maintenance", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/edges", label: "35. Edges", color: "#555" }),
         NavEntry::Part("Part V: Incident Management"),
-        NavEntry::Chapter(NavItem { href: "/chapter/site-events", label: "35. Site Events", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/detection", label: "36. Detection", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/escalation", label: "37. Escalation", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/root-causes", label: "38. Root Causes", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/remediation", label: "39. Remediation", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/prevention", label: "40. Prevention", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/communication", label: "41. Communication", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/site-events", label: "36. Site Events", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/detection", label: "37. Detection", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/escalation", label: "38. Escalation", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/root-causes", label: "39. Root Causes", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/remediation", label: "40. Remediation", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/prevention", label: "41. Prevention", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/communication", label: "42. Communication", color: "#555" }),
         NavEntry::Separator,
         NavEntry::Chapter(NavItem { href: "/afterword", label: "Afterword", color: "#888" }),
         NavEntry::Chapter(NavItem { href: "/colophon", label: "Colophon", color: "#888" }),
@@ -1009,7 +1010,7 @@ fn landing_page() -> String {
             </div>
             <div class="si-entry">
                 <div class="si-name"><span class="si-dot" style="background:#1B998B"></span> loadbalancer</div>
-                <div class="si-chapters"><a href="/chapter/load-balancing">21. Load Balancing</a> &middot; <a href="/chapter/routing">6. Routing</a> &middot; <a href="/chapter/traffic">24. Traffic</a></div>
+                <div class="si-chapters"><a href="/chapter/load-balancing">21. Load Balancing</a> &middot; <a href="/chapter/routing">6. Routing</a> &middot; <a href="/chapter/traffic">25. Traffic</a></div>
             </div>
             <div class="si-entry">
                 <div class="si-name"><span class="si-dot" style="background:#B5179E"></span> monitoring</div>
@@ -1068,6 +1069,7 @@ fn wrap_dashboard(title: &str, nav_active: &str, body: &str) -> String {
         ("/dashboard/security", "Security"),
         ("/dashboard/loadbalancer", "Load Balancer"),
         ("/dashboard/consistency", "Consistency"),
+        ("/dashboard/regions", "Regions"),
     ];
 
     let nav_html: String = nav_items
@@ -2340,6 +2342,134 @@ async fn page_consistency_post(post_body: &str) -> String {
     page_consistency().await
 }
 
+// ── Regions dashboard ────────────────────────────────────────────────────────
+
+async fn page_regions() -> String {
+    let region = std::env::var("REGION").unwrap_or_else(|_| "local".to_string());
+    let peers_str = std::env::var("DISCOVERY_PEERS").unwrap_or_default();
+
+    // Region definitions
+    let regions = vec![
+        ("SFO", "10.0.0.1"),
+        ("NYC", "10.0.0.2"),
+        ("AMS", "10.0.0.3"),
+    ];
+
+    // Card 1: Regions table with reachability
+    let mut regions_rows = String::new();
+    for (name, ip) in &regions {
+        let discovery_addr = format!("{}:10200", ip);
+        let reachable = match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::net::TcpStream::connect(&discovery_addr),
+        )
+        .await
+        {
+            Ok(Ok(_)) => "<span style=\"color:#10B981\">reachable</span>",
+            _ => "<span style=\"color:#EF4444\">unreachable</span>",
+        };
+        regions_rows.push_str(&format!(
+            "<tr><td>{}</td><td><code>{}</code></td><td>{}</td></tr>\n",
+            name, ip, reachable
+        ));
+    }
+
+    // Card 2: Mesh latency
+    let pairs = vec![
+        ("SFO", "NYC", "10.0.0.1:10200", "10.0.0.2:10200"),
+        ("SFO", "AMS", "10.0.0.1:10200", "10.0.0.3:10200"),
+        ("NYC", "AMS", "10.0.0.2:10200", "10.0.0.3:10200"),
+    ];
+
+    let mut latency_rows = String::new();
+    for (a, b, _addr_a, addr_b) in &pairs {
+        let start = std::time::Instant::now();
+        let rtt = match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::net::TcpStream::connect(addr_b),
+        )
+        .await
+        {
+            Ok(Ok(_)) => format!("{:.0}ms", start.elapsed().as_secs_f64() * 1000.0),
+            _ => "timeout".to_string(),
+        };
+        latency_rows.push_str(&format!(
+            "<tr><td>{} &harr; {}</td><td>{}</td></tr>\n",
+            a, b, rtt
+        ));
+    }
+
+    // Card 3: Cross-region replication stats
+    let tailer_addr = "127.0.0.1:10400";
+    let tailer_stats = match rpc::client::send_request(
+        tailer_addr,
+        rpc::Request {
+            procedure_id: 1,
+            payload: "0".to_string(),
+        },
+    )
+    .await
+    {
+        Ok(resp) => resp.payload,
+        Err(_) => "unavailable".to_string(),
+    };
+
+    let storage_all = discovery::list("storage".to_string()).await;
+    let storage_local = discovery::list_local("storage".to_string()).await;
+    let all_count = storage_all.addresses.split(';').filter(|s| !s.is_empty()).count();
+    let local_count = storage_local.addresses.split(';').filter(|s| !s.is_empty()).count();
+    let remote_count = if all_count > local_count { all_count - local_count } else { 0 };
+
+    let cache_mode = caching::get_mode(CACHING_ADDR).await;
+
+    let discovery_peers: Vec<&str> = peers_str.split(',').filter(|s| !s.is_empty()).collect();
+
+    let body = format!(
+        r#"
+    <div class="card">
+        <h2>Regions</h2>
+        <table>
+            <thead><tr><th>Region</th><th>WireGuard IP</th><th>Discovery</th></tr></thead>
+            <tbody>{regions_rows}</tbody>
+        </table>
+        <p style="margin-top:8px;color:#888">Current region: <strong>{region}</strong></p>
+    </div>
+
+    <div class="card">
+        <h2>Mesh Latency</h2>
+        <table>
+            <thead><tr><th>Link</th><th>TCP Connect RTT</th></tr></thead>
+            <tbody>{latency_rows}</tbody>
+        </table>
+        <p style="margin-top:8px;color:#888">Measured via TCP connect to remote discovery port.</p>
+    </div>
+
+    <div class="card">
+        <h2>Cross-Region Replication</h2>
+        <table>
+            <tbody>
+                <tr><td>Tailer stats</td><td><code>{tailer_stats}</code></td></tr>
+                <tr><td>Local storage instances</td><td>{local_count}</td></tr>
+                <tr><td>Remote storage instances</td><td>{remote_count}</td></tr>
+                <tr><td>Cache consistency mode</td><td>{cache_mode}</td></tr>
+                <tr><td>Discovery peers</td><td>{disc_peers}</td></tr>
+            </tbody>
+        </table>
+    </div>
+    "#,
+        regions_rows = regions_rows,
+        region = region,
+        latency_rows = latency_rows,
+        tailer_stats = tailer_stats,
+        local_count = local_count,
+        remote_count = remote_count,
+        cache_mode = cache_mode.mode,
+        disc_peers = if discovery_peers.is_empty() { "none (local mode)".to_string() } else { discovery_peers.join(", ") },
+    );
+
+    wrap_dashboard("Regions", "Regions", &body)
+}
+
 // ── SEO helpers ─────────────────────────────────────────────────────────────
 
 fn generate_sitemap() -> String {
@@ -2489,6 +2619,10 @@ async fn handle_request(
         ("GET", "/chapter/placement") => (
             200,
             book_page("Placement", "placement", "/chapter/placement", content::chapter_placement()),
+        ),
+        ("GET", "/chapter/global-distribution") => (
+            200,
+            book_page("Global Distribution", "global-distribution", "/chapter/global-distribution", content::chapter_global_distribution()),
         ),
         ("GET", "/chapter/traffic") => (
             200,
@@ -2692,6 +2826,7 @@ async fn handle_request(
                 (200, page_consistency_post(body).await)
             }
         }
+        ("GET", "/dashboard/regions") => (200, page_regions().await),
 
         // ── SEO: robots.txt and sitemap.xml ──
         ("GET", "/robots.txt") => (200, "User-agent: *\nAllow: /\nDisallow: /dashboard\nDisallow: /api/\nSitemap: https://p.jjm.net/sitemap.xml\n".to_string()),

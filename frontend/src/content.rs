@@ -1020,6 +1020,11 @@ for attempt in 1..=MAX_RETRIES {
         }
     }
 }</code></pre>
+
+<p>As systems grow, they eventually need to span multiple geographic regions.
+<a href="/chapter/global-distribution">Chapter 24: Global Distribution</a>
+explores how to replicate a full system stack across regions while keeping
+latency low and data consistent.</p>
 "##
 }
 
@@ -4067,6 +4072,12 @@ application-level merge functions.</p>
 
 <p>Visit the <a href="/dashboard/consistency">consistency dashboard</a> to change
 modes and observe the effect on latency and behavior.</p>
+
+<p>Cross-region latency makes these consistency trade-offs even more consequential.
+When peers span continents, strong consistency may add hundreds of milliseconds
+to every operation.  <a href="/chapter/global-distribution">Chapter 24: Global
+Distribution</a> examines how our system uses local quorum for fast writes and
+asynchronous replication for cross-region consistency.</p>
 "##
 }
 
@@ -4099,12 +4110,207 @@ all servers in the rack; a power failure affects all racks in a power
 domain; a building failure affects all power domains in the building.
 Placing all replicas of critical data in the same rack defeats the
 purpose of replication.</p>
+
+<p>The region is the largest failure domain.  Distributing across geographic
+regions protects against disasters that affect an entire datacenter.
+<a href="/chapter/global-distribution">Chapter 24: Global Distribution</a>
+describes how our system runs a full stack in each region, with federated
+discovery and WAL-based replication bridging the gap.</p>
+"##
+}
+
+pub fn chapter_global_distribution() -> &'static str {
+    r##"
+<h1>Chapter 24: Global Distribution</h1>
+
+<p><span class="newthought">A system that runs</span> in a single datacenter is a system with a
+single point of failure.  No matter how many replicas you run, no matter how
+carefully you design your failover, a backhoe through the fiber, a power grid
+outage, or a cooling system failure can take everything offline at once.
+Global distribution &mdash; running the full system in multiple geographic
+regions &mdash; is how planetary scale systems survive regional failures and
+serve users with low latency worldwide.</p>
+
+<h2>Why Distribute</h2>
+
+<p>Three forces drive global distribution.  <em>Latency</em>: light takes 74ms to
+travel from San Francisco to New York and back, and 165ms to Amsterdam.  Users
+notice.  Running a copy of the system in each region means most requests are
+served locally.  <em>Availability</em>: independent infrastructure in separate
+regions means a failure in one region does not affect the others.  If the SFO
+region goes dark, NYC and AMS continue serving traffic.  <em>Data sovereignty</em>:
+some jurisdictions require that data about their citizens remain within their
+borders.  A multi-region architecture makes compliance possible.</p>
+
+<h2>Full Stack Per Region</h2>
+
+<p>Our approach is simple: each region runs the complete system.
+<a href="/chapter/discovery" class="sys" style="color:#F7B731">Discovery</a>,
+<a href="/chapter/routing" class="sys" style="color:#2A9D8F">routing</a>,
+<a href="/chapter/caching" class="sys" style="color:#7209B7">caching</a>,
+<a href="/chapter/storage" class="sys" style="color:#5E60CE">storage</a>,
+<a href="/chapter/monitoring" class="sys" style="color:#B5179E">monitoring</a>,
+<a href="/chapter/scheduling" class="sys" style="color:#FF6B35">scheduling</a> &mdash;
+every service runs in every region.  Local requests never leave the region.
+Only two things cross regional boundaries: storage replication (so data
+written in one region eventually appears in others) and cache invalidation
+(so stale entries are purged everywhere).</p>
+
+<span class="sidenote">This is sometimes called an &ldquo;active-active&rdquo; multi-region
+deployment: every region can handle reads and writes independently, with
+asynchronous replication keeping them in sync.</span>
+
+<h2>The WireGuard Mesh</h2>
+
+<p>The regions communicate over a private WireGuard mesh network.  Each region
+has a WireGuard IP on a shared <code>10.0.0.0/24</code> subnet:</p>
+
+<pre class="code-block"><code>SFO   10.0.0.1
+NYC   10.0.0.2
+AMS   10.0.0.3</code></pre>
+
+<span class="sidenote">WireGuard provides encrypted, authenticated tunnels with
+minimal overhead.  The mesh topology means every region can reach every other
+region directly, without routing through a hub.  See
+<a href="/chapter/network">Chapter 31: Network</a> for more on network
+overlays.</span>
+
+<p>This private overlay network means services can bind to <code>0.0.0.0</code>
+and accept connections from both local services (via <code>127.0.0.1</code>)
+and remote regions (via the WireGuard interface).  The <code>BIND_HOST</code>
+environment variable controls the listen address, and <code>region.env</code>
+configures the per-region settings:</p>
+
+<pre class="code-block"><code># region.env (per droplet)
+REGION=sfo
+DISCOVERY_PEERS=10.0.0.2:10200,10.0.0.3:10200</code></pre>
+
+<h2>Federated Discovery</h2>
+
+<p>The key insight of our multi-region architecture is that
+<a href="/chapter/discovery" class="sys" style="color:#F7B731">discovery</a>
+itself becomes federated.  Each region's discovery instance maintains two
+registries: a <em>local</em> registry of services that registered directly
+(the same registry from <a href="/chapter/discovery">Chapter 5</a>), and a
+<em>federated</em> registry of services forwarded from peer discovery instances
+in other regions.</p>
+
+<p>A background task runs every five seconds.  It collects all locally-registered
+services, rewrites their <code>127.0.0.1</code> addresses to the region's
+WireGuard IP, and forwards these registrations to each peer discovery instance
+using a <code>FEDERATED_REGISTER</code> RPC.  The remote discovery stores these
+in its federated registry with the same staleness-based expiry used for local
+entries.</p>
+
+<span class="sidenote">This is a gossip-like protocol: each discovery instance
+tells its peers about the services it knows.  Stale entries are cleaned up
+automatically, so if a region goes offline its services disappear from all
+registries within seconds.</span>
+
+<p>The result is two complementary views.  <code>discovery::list("storage")</code>
+returns all storage instances across all regions &mdash; useful for cache
+invalidation, which must propagate globally.
+<code>discovery::list_local("storage")</code> returns only the current region's
+instances &mdash; useful for quorum operations, where cross-region latency would
+make consensus impractically slow.</p>
+
+<h2>WAL Tailer</h2>
+
+<p>Cross-region storage replication is handled by the <em>WAL tailer</em>, a
+lightweight service that reads the write-ahead log files produced by local
+<a href="/chapter/storage" class="sys" style="color:#5E60CE">storage</a>
+instances and replays them to remote storage instances.  It runs one instance
+per region.</p>
+
+<p>The tailer discovers local storage instances via
+<code>discovery::list_local("storage")</code> and remote instances by
+subtracting the local set from <code>discovery::list("storage")</code>.  For
+each local instance, it maintains a byte offset into the WAL file and
+periodically reads new entries:</p>
+
+<pre class="code-block"><code>// WAL entry format (same as storage engine)
+VPUT key=value@version
+VDEL key@version</code></pre>
+
+<p>Each new entry is sent to every remote storage instance via
+<code>storage::replicate_put()</code> or <code>storage::replicate_delete()</code>.
+The versioned replication protocol ensures idempotency: if an entry has already
+been applied (because its version is older than the current version for that
+key), the remote instance simply ignores it.</p>
+
+<span class="sidenote">When storage compaction occurs (the WAL is truncated and
+a snapshot is written), the tailer detects the file size decrease, reads the
+snapshot entries, and resends them.  This is safe because replicated writes are
+idempotent.</span>
+
+<h2>Cache Invalidation Across Regions</h2>
+
+<p>The <a href="/chapter/caching" class="sys" style="color:#7209B7">caching</a>
+service already supports multiple consistency modes: eventual, quorum, and
+strong (see <a href="/chapter/consistency">Chapter 22</a>).  With federated
+discovery, <code>discovery::list("caching")</code> now returns cache instances
+from all regions.  The existing replication logic &mdash; which propagates
+<code>SET</code> and <code>DELETE</code> operations to peers &mdash; automatically
+extends across regions.</p>
+
+<p>In eventual mode, cache writes are replicated asynchronously to all peers
+including those in remote regions.  In quorum mode, the write waits for one
+peer acknowledgment, which will typically come from a local peer (since
+local responses arrive first).  In strong mode, the write waits for all peers,
+including remote ones &mdash; which means it pays the full cross-region latency
+penalty.</p>
+
+<h2>Region Configuration</h2>
+
+<p>Each region is configured via a <code>region.env</code> file that is sourced
+at startup.  The only required setting is <code>DISCOVERY_PEERS</code> &mdash;
+the WireGuard addresses of the other regions' discovery instances.  This single
+variable bootstraps the entire cross-region topology:</p>
+
+<pre class="code-block"><code># SFO (10.0.0.1) — peers are NYC and AMS
+REGION=sfo
+DISCOVERY_PEERS=10.0.0.2:10200,10.0.0.3:10200
+
+# NYC (10.0.0.2) — peers are SFO and AMS
+REGION=nyc
+DISCOVERY_PEERS=10.0.0.1:10200,10.0.0.3:10200
+
+# AMS (10.0.0.3) — peers are SFO and NYC
+REGION=ams
+DISCOVERY_PEERS=10.0.0.1:10200,10.0.0.2:10200</code></pre>
+
+<span class="sidenote">Compare this with the previous approach, which required
+separate <code>STORAGE_PEERS</code> and <code>CACHE_PEERS</code> environment
+variables listing every remote instance of every service.  Federated discovery
+reduces the configuration surface to a single variable per region.</span>
+
+<h2>Latency Trade-offs</h2>
+
+<p>The inter-region latencies in our three-region deployment are roughly:</p>
+
+<pre class="code-block"><code>SFO ↔ NYC    ~74ms RTT
+SFO ↔ AMS   ~165ms RTT
+NYC ↔ AMS    ~92ms RTT</code></pre>
+
+<p>These latencies make cross-region quorum consensus impractical for most
+workloads.  A storage write with <code>W=2</code> quorum that includes a
+remote peer would add 74&ndash;165ms to every write.  Instead, our architecture
+uses local quorum for consistency within a region (fast, sub-millisecond) and
+asynchronous replication across regions (eventually consistent, but no latency
+penalty on the write path).</p>
+
+<p>This is the fundamental trade-off of global distribution: you can have
+strong consistency across regions or low-latency writes, but not both.  Our
+system chooses low-latency writes with eventual cross-region consistency.
+For workloads that require stronger guarantees, the caching layer's strong
+consistency mode is available &mdash; at the cost of cross-region latency on
+every operation.</p>
 "##
 }
 
 pub fn chapter_traffic() -> &'static str {
     r##"
-<h1>Chapter 24: Traffic</h1>
+<h1>Chapter 25: Traffic</h1>
 
 <p><span class="newthought">Traffic is the lifeblood</span> of a distributed system.
 Understanding traffic patterns &mdash; when requests arrive, where they come
@@ -4135,7 +4341,7 @@ traffic surge, a dependency failure, or a bug in a newly deployed version.</p>
 
 pub fn chapter_faults() -> &'static str {
     r##"
-<h1>Chapter 25: Faults</h1>
+<h1>Chapter 26: Faults</h1>
 
 <p><span class="newthought">In a planetary scale computer,</span> faults are not exceptional
 events &mdash; they are the norm.  With millions of components, something is
@@ -4169,7 +4375,7 @@ by automated failover or human intervention.</p>
 
 pub fn chapter_outages() -> &'static str {
     r##"
-<h1>Chapter 26: Outages</h1>
+<h1>Chapter 27: Outages</h1>
 
 <p><span class="newthought">An outage</span> is the visible consequence of faults that
 overwhelm the system's fault tolerance.  When enough components fail
@@ -4203,7 +4409,7 @@ system more resilient.</p>
 
 pub fn chapter_resources() -> &'static str {
     r##"
-<h1>Chapter 27: Resources</h1>
+<h1>Chapter 28: Resources</h1>
 
 <p><span class="newthought">The planetary scale computer</span> runs on physical resources:
 compute (processors that execute instructions), memory (fast storage for
@@ -4232,7 +4438,7 @@ or a remote service (tens of milliseconds).</p>
 
 pub fn chapter_servers() -> &'static str {
     r##"
-<h1>Chapter 28: Servers</h1>
+<h1>Chapter 29: Servers</h1>
 
 <p><span class="newthought">A server</span> is the basic unit of compute in a planetary
 scale computer.  Modern servers pack enormous capability into a compact
@@ -4265,7 +4471,7 @@ to dedicated hardware.</p>
 
 pub fn chapter_buildings() -> &'static str {
     r##"
-<h1>Chapter 29: Buildings</h1>
+<h1>Chapter 30: Buildings</h1>
 
 <p><span class="newthought">Data centers</span> are the physical homes of planetary scale
 computers.  A modern data center is an engineering marvel: a building
@@ -4292,7 +4498,7 @@ providers operate data centers on every inhabited continent, with each
 
 pub fn chapter_network() -> &'static str {
     r##"
-<h1>Chapter 30: Network</h1>
+<h1>Chapter 31: Network</h1>
 
 <p><span class="newthought">The network</span> is the nervous system of the planetary scale
 computer.  It connects servers within a rack, racks within a data center,
@@ -4319,12 +4525,18 @@ Unlike server failures (which are typically independent), network failures
 can partition large groups of servers simultaneously, creating split-brain
 scenarios that consensus protocols like our <a href="/chapter/consensus" class="sys" style="color:#06D6A0">consensus</a> service are
 designed to handle.</p>
+
+<p>Our three-region deployment uses a WireGuard mesh to create a private overlay
+network connecting SFO, NYC, and AMS.
+<a href="/chapter/global-distribution">Chapter 24: Global Distribution</a>
+describes how this mesh enables federated discovery and cross-region storage
+replication.</p>
 "##
 }
 
 pub fn chapter_power() -> &'static str {
     r##"
-<h1>Chapter 31: Power</h1>
+<h1>Chapter 32: Power</h1>
 
 <p><span class="newthought">Power is the ultimate</span> resource constraint of a planetary
 scale computer.  Everything &mdash; computation, storage, networking, and
@@ -4356,7 +4568,7 @@ factor in site selection.</p>
 
 pub fn chapter_infra_management() -> &'static str {
     r##"
-<h1>Chapter 32: Management</h1>
+<h1>Chapter 33: Management</h1>
 
 <p><span class="newthought">Managing the physical infrastructure</span> of a planetary scale
 computer is an enormous operational challenge.  With thousands of servers
@@ -4384,7 +4596,7 @@ automated and auditable.</p>
 
 pub fn chapter_maintenance() -> &'static str {
     r##"
-<h1>Chapter 33: Maintenance</h1>
+<h1>Chapter 34: Maintenance</h1>
 
 <p><span class="newthought">Maintenance is the ongoing work</span> required to keep the
 planetary scale computer healthy.  Unlike a personal computer that can be
@@ -4412,7 +4624,7 @@ cycle.</p>
 
 pub fn chapter_edges() -> &'static str {
     r##"
-<h1>Chapter 34: Edges</h1>
+<h1>Chapter 35: Edges</h1>
 
 <p><span class="newthought">The edge of the network</span> is where the planetary scale
 computer meets its users.  Edge computing moves computation and data
@@ -4439,12 +4651,19 @@ small locations.  Each edge location is a potential source of stale data
 or conflicting state.  The techniques we have studied &mdash; caching with
 TTLs, eventual consistency, and consensus for critical data &mdash; all apply
 at the edge, but the trade-offs shift toward availability and low latency.</p>
+
+<p>Our three-region deployment (SFO, NYC, AMS) is a practical form of edge-like
+distribution &mdash; not hundreds of locations, but enough to cover major
+population centers with low-latency access.
+<a href="/chapter/global-distribution">Chapter 24: Global Distribution</a>
+shows how the full stack runs in each region with asynchronous cross-region
+replication.</p>
 "##
 }
 
 pub fn chapter_site_events() -> &'static str {
     r##"
-<h1>Chapter 35: Site Events</h1>
+<h1>Chapter 36: Site Events</h1>
 
 <p><span class="newthought">A site event</span> is a significant incident that affects the
 availability, performance, or correctness of the planetary scale computer.
@@ -4477,7 +4696,7 @@ post-incident review.</p>
 
 pub fn chapter_detection() -> &'static str {
     r##"
-<h1>Chapter 36: Detection</h1>
+<h1>Chapter 37: Detection</h1>
 
 <p><span class="newthought">The first step</span> in managing any incident is knowing
 that something is wrong.  Detection is the bridge between a silent failure
@@ -4514,7 +4733,7 @@ requiring immediate human intervention.</p>
 
 pub fn chapter_escalation() -> &'static str {
     r##"
-<h1>Chapter 37: Escalation</h1>
+<h1>Chapter 38: Escalation</h1>
 
 <p><span class="newthought">Once an incident is detected,</span> the next critical
 decision is how urgently to respond and who needs to be involved.
@@ -4551,7 +4770,7 @@ in the human response chain.</p>
 
 pub fn chapter_root_causes() -> &'static str {
     r##"
-<h1>Chapter 38: Root Causes</h1>
+<h1>Chapter 39: Root Causes</h1>
 
 <p><span class="newthought">After an incident is mitigated,</span> the most important
 work begins: understanding why it happened.  Root cause analysis goes
@@ -4589,7 +4808,7 @@ incidents without having to experience them firsthand.</p>
 
 pub fn chapter_remediation() -> &'static str {
     r##"
-<h1>Chapter 39: Remediation</h1>
+<h1>Chapter 40: Remediation</h1>
 
 <p><span class="newthought">Remediation is the work</span> of restoring a system to
 full health after an incident.  It operates on three timescales:
@@ -4628,7 +4847,7 @@ and monitoring, closes the remediation loop.</p>
 
 pub fn chapter_prevention() -> &'static str {
     r##"
-<h1>Chapter 40: Prevention</h1>
+<h1>Chapter 41: Prevention</h1>
 
 <p><span class="newthought">The best incident</span> is the one that never happens.
 Prevention shifts the focus from reactive response to proactive
@@ -4668,7 +4887,7 @@ merely surviving them.</p>
 
 pub fn chapter_communication() -> &'static str {
     r##"
-<h1>Chapter 41: Communication</h1>
+<h1>Chapter 42: Communication</h1>
 
 <p><span class="newthought">During a site event,</span> communication is as important as
 technical response.  Users need to know that a problem exists, that it
@@ -4707,7 +4926,7 @@ pub fn afterword() -> &'static str {
 <h1>Afterword</h1>
 
 <p><span class="newthought">We began this journey</span> with a simple observation: the Internet
-has changed what it means to use a computer.  Over the course of forty-one
+has changed what it means to use a computer.  Over the course of forty-two
 chapters, we have built &mdash; piece by piece &mdash; the machinery that makes
 planetary scale computing possible.  From serialization formats and RPC
 protocols to consensus algorithms, from caching layers and storage engines

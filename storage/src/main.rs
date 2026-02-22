@@ -25,19 +25,10 @@ struct StorageState {
 
 async fn get_peers(own_addr: &str) -> Vec<String> {
     let mut peers: Vec<String> = Vec::new();
-    let result = discovery::list(SYSTEM_NAME.to_string()).await;
+    let result = discovery::list_local(SYSTEM_NAME.to_string()).await;
     for s in result.addresses.split(';') {
         if !s.is_empty() && s != own_addr {
             peers.push(s.to_string());
-        }
-    }
-    // Cross-region peers from env
-    if let Ok(static_peers) = std::env::var("STORAGE_PEERS") {
-        for s in static_peers.split(',') {
-            let s = s.trim();
-            if !s.is_empty() && s != own_addr && !peers.contains(&s.to_string()) {
-                peers.push(s.to_string());
-            }
         }
     }
     peers

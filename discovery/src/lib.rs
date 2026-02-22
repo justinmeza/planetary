@@ -5,6 +5,8 @@ pub const REGISTER_PROCEDURE: ProcedureId = 1;
 // pub const PING_PROCEDURE: ProcedureId = 2;
 pub const QUERY_PROCEDURE: ProcedureId = 2;
 pub const LIST_PROCEDURE: ProcedureId = 3;
+pub const FEDERATED_REGISTER_PROCEDURE: ProcedureId = 4;
+pub const LIST_LOCAL_PROCEDURE: ProcedureId = 5;
 
 #[derive(Debug, Serializable, Deserializable)]
 pub struct RegisterArgs {
@@ -17,6 +19,12 @@ pub struct RegisterArgs {
 //     pub address: String,
 //     pub port: String,
 // }
+
+#[derive(Debug, Serializable, Deserializable)]
+pub struct FederatedRegisterArgs {
+    pub name: String,
+    pub address: String,
+}
 
 #[derive(Debug, Serializable, Deserializable)]
 pub struct QueryArgs {
@@ -136,6 +144,27 @@ pub async fn list(name: String) -> ListResult {
         }
         Err(e) => {
             panic!("Failed to send list request: {}.", e);
+        }
+    }
+}
+
+pub async fn list_local(name: String) -> ListResult {
+    let args = ListArgs { name: name.clone() };
+
+    let request = Request {
+        procedure_id: LIST_LOCAL_PROCEDURE,
+        payload: args.serialize(),
+    };
+
+    match client::send_request(SYSTEM_ADDRESS, request.clone()).await {
+        Ok(response) => {
+            let result =
+                ListResult::deserialize(&response.payload).expect("Failed to deserialize payload");
+            println!("Local addresses for {}: {}", name, result.addresses);
+            result
+        }
+        Err(e) => {
+            panic!("Failed to send list_local request: {}.", e);
         }
     }
 }

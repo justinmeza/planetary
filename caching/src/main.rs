@@ -161,15 +161,6 @@ async fn get_peers(own_addr: &str) -> Vec<String> {
             peers.push(s.to_string());
         }
     }
-    // Cross-region peers from env
-    if let Ok(static_peers) = std::env::var("CACHE_PEERS") {
-        for s in static_peers.split(',') {
-            let s = s.trim();
-            if !s.is_empty() && s != own_addr && !peers.contains(&s.to_string()) {
-                peers.push(s.to_string());
-            }
-        }
-    }
     peers
 }
 

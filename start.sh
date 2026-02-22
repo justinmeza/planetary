@@ -29,7 +29,7 @@ kill_tree() {
     kill "-$sig" "$pid" 2>/dev/null
 }
 
-PORTS=(8080 10100 10200 10300 10500 10600 10601 10602 10700 10701 10702 10800 10900 11000 11100)
+PORTS=(8080 10100 10200 10300 10400 10500 10600 10601 10602 10700 10701 10702 10800 10900 11000 11100)
 
 kill_port_holders() {
     for port in "${PORTS[@]}"; do
@@ -105,7 +105,7 @@ echo ""
 # Phase 1: Build everything
 echo "Building all services..."
 for dir in normalization rpc discovery scheduling security monitoring \
-           configuration storage caching routing echo release frontend loadbalancer; do
+           configuration storage caching tailer routing echo release frontend loadbalancer; do
     if [ -f "$BASE_DIR/$dir/Cargo.toml" ]; then
         cargo build --manifest-path "$BASE_DIR/$dir/Cargo.toml" 2>/dev/null
     fi
@@ -139,6 +139,7 @@ if [ "${CACHING_REPLICAS:-3}" -ge 3 ]; then wait_for_port caching-3 10702; fi
 wait_for_port routing 10300
 wait_for_port release 11000
 wait_for_port echo 10100
+wait_for_port tailer 10400
 
 # Phase 5: Start HTTP load balancer
 echo ""

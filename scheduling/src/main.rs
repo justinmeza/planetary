@@ -187,6 +187,13 @@ const DEFAULT_FLEET: &[FleetEntry] = &[
         base_port: 11000,
     },
     FleetEntry {
+        name: "tailer",
+        manifest_path: "tailer/Cargo.toml",
+        bin_name: "",
+        replicas: 1,
+        base_port: 10400,
+    },
+    FleetEntry {
         name: "frontend",
         manifest_path: "frontend/Cargo.toml",
         bin_name: "",
