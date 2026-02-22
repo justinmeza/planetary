@@ -213,7 +213,7 @@ fn book_nav_entries() -> Vec<NavEntry> {
         NavEntry::Chapter(NavItem { href: "/chapter/load-balancing", label: "21. Load Balancing", color: "#1B998B" }),
         NavEntry::Chapter(NavItem { href: "/chapter/consistency", label: "22. Consistency", color: "#A855F7" }),
         NavEntry::Chapter(NavItem { href: "/chapter/placement", label: "23. Placement", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/global-distribution", label: "24. Global Distribution", color: "#10B981" }),
+        NavEntry::Chapter(NavItem { href: "/chapter/geo-replication", label: "24. Geo Replication", color: "#10B981" }),
         NavEntry::Chapter(NavItem { href: "/chapter/traffic", label: "25. Traffic", color: "#555" }),
         NavEntry::Chapter(NavItem { href: "/chapter/faults", label: "26. Faults", color: "#555" }),
         NavEntry::Chapter(NavItem { href: "/chapter/outages", label: "27. Outages", color: "#555" }),
@@ -2801,9 +2801,9 @@ async fn handle_request(
             200,
             book_page("Placement", "placement", "/chapter/placement", content::chapter_placement()),
         ),
-        ("GET", "/chapter/global-distribution") => (
+        ("GET", "/chapter/geo-replication") => (
             200,
-            book_page("Global Distribution", "global-distribution", "/chapter/global-distribution", content::chapter_global_distribution()),
+            book_page("Geo Replication", "geo-replication", "/chapter/geo-replication", content::chapter_geo_replication()),
         ),
         ("GET", "/chapter/traffic") => (
             200,

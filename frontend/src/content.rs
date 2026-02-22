@@ -1022,7 +1022,7 @@ for attempt in 1..=MAX_RETRIES {
 }</code></pre>
 
 <p>As systems grow, they eventually need to span multiple geographic regions.
-<a href="/chapter/global-distribution">Chapter 24: Global Distribution</a>
+<a href="/chapter/geo-replication">Chapter 24: Geo Replication</a>
 explores how to replicate a full system stack across regions while keeping
 latency low and data consistent.</p>
 "##
@@ -4163,8 +4163,8 @@ modes and observe the effect on latency and behavior.</p>
 
 <p>Cross-region latency makes these consistency trade-offs even more consequential.
 When peers span continents, strong consistency may add hundreds of milliseconds
-to every operation.  <a href="/chapter/global-distribution">Chapter 24: Global
-Distribution</a> examines how our system uses local quorum for fast writes and
+to every operation.  <a href="/chapter/geo-replication">Chapter 24: Geo
+Replication</a> examines how our system uses local quorum for fast writes and
 asynchronous replication for cross-region consistency.</p>
 "##
 }
@@ -4201,15 +4201,15 @@ purpose of replication.</p>
 
 <p>The region is the largest failure domain.  Distributing across geographic
 regions protects against disasters that affect an entire datacenter.
-<a href="/chapter/global-distribution">Chapter 24: Global Distribution</a>
+<a href="/chapter/geo-replication">Chapter 24: Geo Replication</a>
 describes how our system runs a full stack in each region, with federated
 discovery and WAL-based replication bridging the gap.</p>
 "##
 }
 
-pub fn chapter_global_distribution() -> &'static str {
+pub fn chapter_geo_replication() -> &'static str {
     r##"
-<h1>Chapter 24: Global Distribution</h1>
+<h1>Chapter 24: Geo Replication</h1>
 
 <p><span class="newthought">A system that runs</span> in a single datacenter is a system with a
 single point of failure.  No matter how many replicas you run, no matter how
@@ -4616,7 +4616,7 @@ designed to handle.</p>
 
 <p>Our three-region deployment uses a WireGuard mesh to create a private overlay
 network connecting SFO, NYC, and AMS.
-<a href="/chapter/global-distribution">Chapter 24: Global Distribution</a>
+<a href="/chapter/geo-replication">Chapter 24: Geo Replication</a>
 describes how this mesh enables federated discovery and cross-region storage
 replication.</p>
 "##
@@ -4743,7 +4743,7 @@ at the edge, but the trade-offs shift toward availability and low latency.</p>
 <p>Our three-region deployment (SFO, NYC, AMS) is a practical form of edge-like
 distribution &mdash; not hundreds of locations, but enough to cover major
 population centers with low-latency access.
-<a href="/chapter/global-distribution">Chapter 24: Global Distribution</a>
+<a href="/chapter/geo-replication">Chapter 24: Geo Replication</a>
 shows how the full stack runs in each region with asynchronous cross-region
 replication.</p>
 "##
