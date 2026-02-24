@@ -4260,7 +4260,7 @@ AMS   10.0.0.3</code></pre>
 <span class="sidenote">WireGuard provides encrypted, authenticated tunnels with
 minimal overhead.  The mesh topology means every region can reach every other
 region directly, without routing through a hub.  See
-<a href="/chapter/network">Chapter 31: Network</a> for more on network
+<a href="/chapter/network">Chapter 32: Network</a> for more on network
 overlays.</span>
 
 <p>This private overlay network means services can bind to <code>0.0.0.0</code>
@@ -4396,9 +4396,216 @@ every operation.</p>
 "##
 }
 
+pub fn chapter_localization() -> &'static str {
+    r##"
+<h1>Chapter 25: Localization</h1>
+
+<p><span class="newthought">We put servers</span> near users to reduce latency.
+But latency is not just measured in milliseconds &mdash; it is also measured in
+comprehension.  If a reader must mentally translate every sentence from a foreign
+language, the &ldquo;round-trip time&rdquo; of understanding explodes.  Localization
+is the practice of adapting a system to a particular language, region, and
+cultural conventions.  Just as we replicate data to bring it closer to users
+(see <a href="/chapter/geo-replication">Chapter 24: Geo Replication</a>), we
+replicate <em>content</em> in the user's native language to bring understanding
+closer to them.</p>
+
+<span class="sidenote">Internationalization (i18n) is the engineering work that
+makes localization possible &mdash; structuring code so that locale-specific
+content can be swapped without changing logic.  Localization (l10n) is the act
+of producing content for a specific locale.  This chapter covers both.</span>
+
+<h2>Locale Detection</h2>
+
+<p>The first question a localized system must answer is: what language does this
+user want?  We use a detection chain that checks multiple signals in priority
+order:</p>
+
+<pre class="code-loadbalancer"><code>fn detect_lang(path: &amp;str, headers: &amp;str) -&gt; (Lang, &amp;str) {
+    // 1. URL prefix: /ja/chapter/systems → Lang::Ja
+    if path.starts_with("/ja/") {
+        return (Lang::Ja, &amp;path[3..]);
+    }
+    if path == "/ja" {
+        return (Lang::Ja, "/");
+    }
+
+    // 2. Cookie: lang=ja (persisted preference)
+    if let Some(lang) = parse_cookie(headers, "lang") {
+        if lang == "ja" {
+            return (Lang::Ja, path);
+        }
+    }
+
+    // 3. Accept-Language header: ja vs en quality values
+    let lang = parse_accept_language(headers);
+    (lang, path)
+}</code></pre>
+
+<p>The chain follows a principle: <strong>explicit choices override implicit
+signals</strong>.  A URL prefix is the most explicit &mdash; the user clicked
+a link in a specific language.  A cookie records a previous explicit choice.
+The <code>Accept-Language</code> header is a browser-level default that the user
+may not have consciously configured.</p>
+
+<h2>URL-Based Routing</h2>
+
+<p>We chose URL prefixes (<code>/ja/chapter/systems</code>) over query parameters
+(<code>/chapter/systems?lang=ja</code>) for language routing.  There are several
+reasons for this:</p>
+
+<p><strong>Cacheability.</strong>  CDNs and reverse proxies cache by URL path.
+Separate paths mean the English and Japanese versions each get their own cache
+entry without special configuration.  Query parameters are often stripped or
+ignored by caches.</p>
+
+<p><strong>SEO.</strong>  Search engines treat different URL paths as distinct
+pages.  Combined with <code>hreflang</code> alternate tags, this allows Google
+to serve the Japanese version to Japanese-language searchers and the English
+version to English-language searchers:</p>
+
+<pre class="code-loadbalancer"><code>&lt;link rel="alternate" hreflang="en" href="https://p.jjm.net/chapter/systems"&gt;
+&lt;link rel="alternate" hreflang="ja" href="https://p.jjm.net/ja/chapter/systems"&gt;</code></pre>
+
+<span class="sidenote">The <code>hreflang</code> tag tells search engines that
+two pages are translations of each other.  Without these tags, a search engine
+might penalize the Japanese page as duplicate content.</span>
+
+<p><strong>Shareability.</strong>  A user can share <code>/ja/chapter/discovery</code>
+with a colleague and the recipient sees the Japanese version immediately, without
+needing to change any settings.</p>
+
+<h2>Content Module Structure</h2>
+
+<p>Each language has its own content module that mirrors the English original.  The
+English content lives in <code>content.rs</code> and the Japanese translation
+in <code>content_ja.rs</code>.  Both modules expose identical function
+signatures:</p>
+
+<pre class="code-loadbalancer"><code>// content.rs (English)
+pub fn chapter_systems() -&gt; &amp;'static str { r#"..."# }
+pub fn chapter_discovery() -&gt; &amp;'static str { r#"..."# }
+// ... 47 content functions
+
+// content_ja.rs (Japanese)
+pub fn chapter_systems() -&gt; &amp;'static str { r#"..."# }
+pub fn chapter_discovery() -&gt; &amp;'static str { r#"..."# }
+// ... 47 content functions (translated prose, English code)</code></pre>
+
+<p>A dispatch function routes to the correct module based on the detected
+language:</p>
+
+<pre class="code-loadbalancer"><code>#[derive(Clone, Copy, PartialEq)]
+enum Lang { En, Ja }
+
+fn content_for(lang: Lang, slug: &amp;str) -&gt; &amp;'static str {
+    match lang {
+        Lang::En =&gt; match slug {
+            "foreword" =&gt; content::foreword(),
+            "systems" =&gt; content::chapter_systems(),
+            // ...
+            _ =&gt; "&lt;h1&gt;Not Found&lt;/h1&gt;",
+        },
+        Lang::Ja =&gt; match slug {
+            "foreword" =&gt; content_ja::foreword(),
+            "systems" =&gt; content_ja::chapter_systems(),
+            // ...
+            _ =&gt; "&lt;h1&gt;Not Found&lt;/h1&gt;",
+        },
+    }
+}</code></pre>
+
+<span class="sidenote">The <code>&amp;'static str</code> return type means
+all content is compiled into the binary.  There is no runtime file I/O, no
+template rendering, no database query.  The content is as fast to serve as a
+static file &mdash; because it <em>is</em> a static string.</span>
+
+<h2>The Language Switcher</h2>
+
+<p>The sidebar contains a language switcher link that lets readers toggle between
+English and Japanese at any time.  The link always points to the same page in
+the other language:</p>
+
+<pre class="code-loadbalancer"><code>// In the sidebar, after the nav entries:
+let switch_href = format!("{}{}", lang.other().prefix(), active_href);
+let switch_label = match lang {
+    Lang::En =&gt; "日本語",
+    Lang::Ja =&gt; "English",
+};
+// Renders: &lt;a href="/ja/chapter/localization"&gt;日本語&lt;/a&gt;</code></pre>
+
+<p>When a reader clicks the language switcher, two things happen:</p>
+
+<p>First, the URL changes to include (or remove) the <code>/ja/</code> prefix,
+so the browser navigates to the translated page.  Second, a
+<code>lang</code> cookie is set so that subsequent visits to the root URL
+(<code>/</code>) will automatically serve the preferred language:</p>
+
+<pre class="code-loadbalancer"><code>Set-Cookie: lang=ja; Path=/; Max-Age=31536000</code></pre>
+
+<p>This means a Japanese reader who visits <code>p.jjm.net</code> directly will
+see the Japanese landing page on their next visit, without needing to navigate
+to <code>/ja/</code> first.  The cookie persists for one year.</p>
+
+<div style="background: var(--sidenote-bg); border: 1px solid var(--sidenote-border); border-radius: 6px; padding: 16px 20px; margin: 24px 0;">
+<strong>Try it now:</strong> Click <strong>日本語</strong> in the sidebar to see
+this chapter in Japanese.  Notice how the URL changes to
+<code>/ja/chapter/localization</code> and all navigation labels switch to
+Japanese.  Click <strong>English</strong> to switch back.
+</div>
+
+<h2>Accept-Language Parsing</h2>
+
+<p>When no URL prefix or cookie is present, we fall back to the browser's
+<code>Accept-Language</code> header.  This header contains a comma-separated
+list of language tags with optional quality values:</p>
+
+<pre class="code-loadbalancer"><code>Accept-Language: ja;q=0.9, en-US;q=0.8, en;q=0.7
+
+fn parse_accept_language(headers: &amp;str) -&gt; Lang {
+    let mut ja_q: f32 = 0.0;
+    let mut en_q: f32 = 0.0;
+    // Parse each language tag and its quality value
+    // "ja;q=0.9" → ja_q = 0.9
+    // "en"       → en_q = 1.0 (default quality)
+    if ja_q &gt; en_q { Lang::Ja } else { Lang::En }
+}</code></pre>
+
+<span class="sidenote">Quality values range from 0 to 1, with 1 being the
+default when <code>q=</code> is omitted.  A header of <code>ja, en;q=0.5</code>
+means &ldquo;I prefer Japanese (quality 1.0) but will accept English (quality
+0.5).&rdquo;</span>
+
+<h2>Translation as Infrastructure</h2>
+
+<p>A common mistake is to treat translation as an afterthought &mdash; building
+the entire system in one language and then scrambling to bolt on translations
+later.  The better approach is to build the localization <em>pipeline</em>
+first:</p>
+
+<p>1. Design the <code>Lang</code> enum and detection chain.</p>
+<p>2. Build the content dispatch function and parallel module structure.</p>
+<p>3. Add the language switcher and <code>hreflang</code> tags.</p>
+<p>4. <em>Then</em> produce translations.</p>
+
+<p>This way, the infrastructure is tested and working before any translation
+begins.  When translations arrive, they slot into the existing module and
+immediately work &mdash; URL routing, cookie persistence, SEO tags, and the
+language switcher all function without additional code changes.</p>
+
+<p>This principle mirrors how we approach all infrastructure in this book:
+build the system first, then let it serve its purpose.  The localization
+infrastructure is the system; the translations are the workload.</p>
+
+<span class="sidenote">This chapter is itself an example.  The localization
+infrastructure described here is the same infrastructure that serves this
+very page in Japanese.  The system describes itself.</span>
+"##
+}
+
 pub fn chapter_traffic() -> &'static str {
     r##"
-<h1>Chapter 25: Traffic</h1>
+<h1>Chapter 26: Traffic</h1>
 
 <p><span class="newthought">Traffic is the lifeblood</span> of a distributed system.
 Understanding traffic patterns &mdash; when requests arrive, where they come
@@ -4429,7 +4636,7 @@ traffic surge, a dependency failure, or a bug in a newly deployed version.</p>
 
 pub fn chapter_faults() -> &'static str {
     r##"
-<h1>Chapter 26: Faults</h1>
+<h1>Chapter 27: Faults</h1>
 
 <p><span class="newthought">In a planetary scale computer,</span> faults are not exceptional
 events &mdash; they are the norm.  With millions of components, something is
@@ -4463,7 +4670,7 @@ by automated failover or human intervention.</p>
 
 pub fn chapter_outages() -> &'static str {
     r##"
-<h1>Chapter 27: Outages</h1>
+<h1>Chapter 28: Outages</h1>
 
 <p><span class="newthought">An outage</span> is the visible consequence of faults that
 overwhelm the system's fault tolerance.  When enough components fail
@@ -4497,7 +4704,7 @@ system more resilient.</p>
 
 pub fn chapter_resources() -> &'static str {
     r##"
-<h1>Chapter 28: Resources</h1>
+<h1>Chapter 29: Resources</h1>
 
 <p><span class="newthought">The planetary scale computer</span> runs on physical resources:
 compute (processors that execute instructions), memory (fast storage for
@@ -4526,7 +4733,7 @@ or a remote service (tens of milliseconds).</p>
 
 pub fn chapter_servers() -> &'static str {
     r##"
-<h1>Chapter 29: Servers</h1>
+<h1>Chapter 30: Servers</h1>
 
 <p><span class="newthought">A server</span> is the basic unit of compute in a planetary
 scale computer.  Modern servers pack enormous capability into a compact
@@ -4559,7 +4766,7 @@ to dedicated hardware.</p>
 
 pub fn chapter_buildings() -> &'static str {
     r##"
-<h1>Chapter 30: Buildings</h1>
+<h1>Chapter 31: Buildings</h1>
 
 <p><span class="newthought">Data centers</span> are the physical homes of planetary scale
 computers.  A modern data center is an engineering marvel: a building
@@ -4586,7 +4793,7 @@ providers operate data centers on every inhabited continent, with each
 
 pub fn chapter_network() -> &'static str {
     r##"
-<h1>Chapter 31: Network</h1>
+<h1>Chapter 32: Network</h1>
 
 <p><span class="newthought">The network</span> is the nervous system of the planetary scale
 computer.  It connects servers within a rack, racks within a data center,
@@ -4624,7 +4831,7 @@ replication.</p>
 
 pub fn chapter_power() -> &'static str {
     r##"
-<h1>Chapter 32: Power</h1>
+<h1>Chapter 33: Power</h1>
 
 <p><span class="newthought">Power is the ultimate</span> resource constraint of a planetary
 scale computer.  Everything &mdash; computation, storage, networking, and
@@ -4656,7 +4863,7 @@ factor in site selection.</p>
 
 pub fn chapter_infra_management() -> &'static str {
     r##"
-<h1>Chapter 33: Management</h1>
+<h1>Chapter 34: Management</h1>
 
 <p><span class="newthought">Managing the physical infrastructure</span> of a planetary scale
 computer is an enormous operational challenge.  With thousands of servers
@@ -4684,7 +4891,7 @@ automated and auditable.</p>
 
 pub fn chapter_maintenance() -> &'static str {
     r##"
-<h1>Chapter 34: Maintenance</h1>
+<h1>Chapter 35: Maintenance</h1>
 
 <p><span class="newthought">Maintenance is the ongoing work</span> required to keep the
 planetary scale computer healthy.  Unlike a personal computer that can be
@@ -4712,7 +4919,7 @@ cycle.</p>
 
 pub fn chapter_edges() -> &'static str {
     r##"
-<h1>Chapter 35: Edges</h1>
+<h1>Chapter 36: Edges</h1>
 
 <p><span class="newthought">The edge of the network</span> is where the planetary scale
 computer meets its users.  Edge computing moves computation and data
@@ -4751,7 +4958,7 @@ replication.</p>
 
 pub fn chapter_site_events() -> &'static str {
     r##"
-<h1>Chapter 36: Site Events</h1>
+<h1>Chapter 37: Site Events</h1>
 
 <p><span class="newthought">A site event</span> is a significant incident that affects the
 availability, performance, or correctness of the planetary scale computer.
@@ -4784,7 +4991,7 @@ post-incident review.</p>
 
 pub fn chapter_detection() -> &'static str {
     r##"
-<h1>Chapter 37: Detection</h1>
+<h1>Chapter 38: Detection</h1>
 
 <p><span class="newthought">The first step</span> in managing any incident is knowing
 that something is wrong.  Detection is the bridge between a silent failure
@@ -4821,7 +5028,7 @@ requiring immediate human intervention.</p>
 
 pub fn chapter_escalation() -> &'static str {
     r##"
-<h1>Chapter 38: Escalation</h1>
+<h1>Chapter 39: Escalation</h1>
 
 <p><span class="newthought">Once an incident is detected,</span> the next critical
 decision is how urgently to respond and who needs to be involved.
@@ -4858,7 +5065,7 @@ in the human response chain.</p>
 
 pub fn chapter_root_causes() -> &'static str {
     r##"
-<h1>Chapter 39: Root Causes</h1>
+<h1>Chapter 40: Root Causes</h1>
 
 <p><span class="newthought">After an incident is mitigated,</span> the most important
 work begins: understanding why it happened.  Root cause analysis goes
@@ -4896,7 +5103,7 @@ incidents without having to experience them firsthand.</p>
 
 pub fn chapter_remediation() -> &'static str {
     r##"
-<h1>Chapter 40: Remediation</h1>
+<h1>Chapter 41: Remediation</h1>
 
 <p><span class="newthought">Remediation is the work</span> of restoring a system to
 full health after an incident.  It operates on three timescales:
@@ -4935,7 +5142,7 @@ and monitoring, closes the remediation loop.</p>
 
 pub fn chapter_prevention() -> &'static str {
     r##"
-<h1>Chapter 41: Prevention</h1>
+<h1>Chapter 42: Prevention</h1>
 
 <p><span class="newthought">The best incident</span> is the one that never happens.
 Prevention shifts the focus from reactive response to proactive
@@ -4975,7 +5182,7 @@ merely surviving them.</p>
 
 pub fn chapter_communication() -> &'static str {
     r##"
-<h1>Chapter 42: Communication</h1>
+<h1>Chapter 43: Communication</h1>
 
 <p><span class="newthought">During a site event,</span> communication is as important as
 technical response.  Users need to know that a problem exists, that it

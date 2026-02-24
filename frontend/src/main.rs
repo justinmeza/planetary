@@ -1,4 +1,5 @@
 mod content;
+mod content_ja;
 
 use rpc::{client, Request};
 use std::collections::HashMap;
@@ -127,6 +128,254 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+// ── Localization ─────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq)]
+enum Lang {
+    En,
+    Ja,
+}
+
+impl Lang {
+    fn code(&self) -> &'static str {
+        match self {
+            Lang::En => "en",
+            Lang::Ja => "ja",
+        }
+    }
+    fn prefix(&self) -> &'static str {
+        match self {
+            Lang::En => "",
+            Lang::Ja => "/ja",
+        }
+    }
+    fn site_title(&self) -> &'static str {
+        match self {
+            Lang::En => "The Planetary Scale Computer",
+            Lang::Ja => "\u{60d1}\u{661f}\u{898f}\u{6a21}\u{30b3}\u{30f3}\u{30d4}\u{30e5}\u{30fc}\u{30bf}",
+        }
+    }
+    fn other(&self) -> Lang {
+        match self {
+            Lang::En => Lang::Ja,
+            Lang::Ja => Lang::En,
+        }
+    }
+}
+
+fn detect_lang<'a>(path: &'a str, headers: &str) -> (Lang, &'a str) {
+    if path.starts_with("/ja/") {
+        return (Lang::Ja, &path[3..]);
+    }
+    if path == "/ja" {
+        return (Lang::Ja, "/");
+    }
+    if let Some(lang_val) = parse_cookie(headers, "lang") {
+        if lang_val == "ja" {
+            return (Lang::Ja, path);
+        }
+    }
+    let lang = parse_accept_language(headers);
+    (lang, path)
+}
+
+fn parse_accept_language(headers: &str) -> Lang {
+    for line in headers.lines() {
+        let lower = line.to_lowercase();
+        if lower.starts_with("accept-language:") {
+            let val = &line[16..];
+            let mut ja_q: f32 = 0.0;
+            let mut en_q: f32 = 0.0;
+            for part in val.split(',') {
+                let part = part.trim();
+                let (tag, q) = if let Some(idx) = part.find(";q=") {
+                    let q_str = &part[idx + 3..];
+                    let q_val = q_str.trim().parse::<f32>().unwrap_or(1.0);
+                    (&part[..idx], q_val)
+                } else {
+                    (part, 1.0)
+                };
+                let tag = tag.trim().to_lowercase();
+                if tag.starts_with("ja") && q > ja_q {
+                    ja_q = q;
+                }
+                if tag.starts_with("en") && q > en_q {
+                    en_q = q;
+                }
+            }
+            if ja_q > en_q {
+                return Lang::Ja;
+            }
+            return Lang::En;
+        }
+    }
+    Lang::En
+}
+
+// ── Content dispatch ────────────────────────────────────────────────────
+
+struct PageMeta {
+    slug: &'static str,
+    href: &'static str,
+    title_en: &'static str,
+    title_ja: &'static str,
+}
+
+const PAGES: &[PageMeta] = &[
+    PageMeta { slug: "foreword", href: "/foreword", title_en: "Foreword", title_ja: "\u{307e}\u{3048}\u{304c}\u{304d}" },
+    PageMeta { slug: "preface", href: "/preface", title_en: "Preface", title_ja: "\u{5e8f}\u{6587}" },
+    PageMeta { slug: "systems", href: "/chapter/systems", title_en: "Systems", title_ja: "\u{30b7}\u{30b9}\u{30c6}\u{30e0}" },
+    PageMeta { slug: "design", href: "/chapter/design", title_en: "Design", title_ja: "\u{8a2d}\u{8a08}" },
+    PageMeta { slug: "consensus", href: "/chapter/consensus", title_en: "Consensus", title_ja: "\u{30b3}\u{30f3}\u{30bb}\u{30f3}\u{30b5}\u{30b9}" },
+    PageMeta { slug: "configuration", href: "/chapter/configuration", title_en: "Configuration", title_ja: "\u{69cb}\u{6210}\u{7ba1}\u{7406}" },
+    PageMeta { slug: "discovery", href: "/chapter/discovery", title_en: "Discovery", title_ja: "\u{30c7}\u{30a3}\u{30b9}\u{30ab}\u{30d0}\u{30ea}" },
+    PageMeta { slug: "routing", href: "/chapter/routing", title_en: "Routing", title_ja: "\u{30eb}\u{30fc}\u{30c6}\u{30a3}\u{30f3}\u{30b0}" },
+    PageMeta { slug: "caching", href: "/chapter/caching", title_en: "Caching", title_ja: "\u{30ad}\u{30e3}\u{30c3}\u{30b7}\u{30f3}\u{30b0}" },
+    PageMeta { slug: "storage", href: "/chapter/storage", title_en: "Storage", title_ja: "\u{30b9}\u{30c8}\u{30ec}\u{30fc}\u{30b8}" },
+    PageMeta { slug: "implementation", href: "/chapter/implementation", title_en: "Implementation", title_ja: "\u{5b9f}\u{88c5}" },
+    PageMeta { slug: "operation", href: "/chapter/operation", title_en: "Operation", title_ja: "\u{904b}\u{7528}" },
+    PageMeta { slug: "scheduling", href: "/chapter/scheduling", title_en: "Scheduling", title_ja: "\u{30b9}\u{30b1}\u{30b8}\u{30e5}\u{30fc}\u{30ea}\u{30f3}\u{30b0}" },
+    PageMeta { slug: "release", href: "/chapter/release", title_en: "Release", title_ja: "\u{30ea}\u{30ea}\u{30fc}\u{30b9}" },
+    PageMeta { slug: "security", href: "/chapter/security", title_en: "Security", title_ja: "\u{30bb}\u{30ad}\u{30e5}\u{30ea}\u{30c6}\u{30a3}" },
+    PageMeta { slug: "monitoring", href: "/chapter/monitoring", title_en: "Monitoring", title_ja: "\u{30e2}\u{30cb}\u{30bf}\u{30ea}\u{30f3}\u{30b0}" },
+    PageMeta { slug: "capacity", href: "/chapter/capacity", title_en: "Capacity", title_ja: "\u{30ad}\u{30e3}\u{30d1}\u{30b7}\u{30c6}\u{30a3}" },
+    PageMeta { slug: "utilization", href: "/chapter/utilization", title_en: "Utilization", title_ja: "\u{5229}\u{7528}\u{7387}" },
+    PageMeta { slug: "efficiency", href: "/chapter/efficiency", title_en: "Efficiency", title_ja: "\u{52b9}\u{7387}" },
+    PageMeta { slug: "load-testing", href: "/chapter/load-testing", title_en: "Load Testing", title_ja: "\u{8ca0}\u{8377}\u{30c6}\u{30b9}\u{30c8}" },
+    PageMeta { slug: "planning", href: "/chapter/planning", title_en: "Planning", title_ja: "\u{8a08}\u{753b}" },
+    PageMeta { slug: "degradation", href: "/chapter/degradation", title_en: "Degradation", title_ja: "\u{7e2e}\u{9000}\u{904b}\u{8ee2}" },
+    PageMeta { slug: "load-balancing", href: "/chapter/load-balancing", title_en: "Load Balancing", title_ja: "\u{30ed}\u{30fc}\u{30c9}\u{30d0}\u{30e9}\u{30f3}\u{30b7}\u{30f3}\u{30b0}" },
+    PageMeta { slug: "consistency", href: "/chapter/consistency", title_en: "Consistency", title_ja: "\u{6574}\u{5408}\u{6027}" },
+    PageMeta { slug: "placement", href: "/chapter/placement", title_en: "Placement", title_ja: "\u{914d}\u{7f6e}" },
+    PageMeta { slug: "geo-replication", href: "/chapter/geo-replication", title_en: "Geo Replication", title_ja: "\u{5730}\u{7406}\u{30ec}\u{30d7}\u{30ea}\u{30b1}\u{30fc}\u{30b7}\u{30e7}\u{30f3}" },
+    PageMeta { slug: "localization", href: "/chapter/localization", title_en: "Localization", title_ja: "\u{30ed}\u{30fc}\u{30ab}\u{30e9}\u{30a4}\u{30bc}\u{30fc}\u{30b7}\u{30e7}\u{30f3}" },
+    PageMeta { slug: "traffic", href: "/chapter/traffic", title_en: "Traffic", title_ja: "\u{30c8}\u{30e9}\u{30d5}\u{30a3}\u{30c3}\u{30af}" },
+    PageMeta { slug: "faults", href: "/chapter/faults", title_en: "Faults", title_ja: "\u{969c}\u{5bb3}" },
+    PageMeta { slug: "outages", href: "/chapter/outages", title_en: "Outages", title_ja: "\u{505c}\u{6b62}" },
+    PageMeta { slug: "resources", href: "/chapter/resources", title_en: "Resources", title_ja: "\u{30ea}\u{30bd}\u{30fc}\u{30b9}" },
+    PageMeta { slug: "servers", href: "/chapter/servers", title_en: "Servers", title_ja: "\u{30b5}\u{30fc}\u{30d0}\u{30fc}" },
+    PageMeta { slug: "buildings", href: "/chapter/buildings", title_en: "Buildings", title_ja: "\u{5efa}\u{7269}" },
+    PageMeta { slug: "network", href: "/chapter/network", title_en: "Network", title_ja: "\u{30cd}\u{30c3}\u{30c8}\u{30ef}\u{30fc}\u{30af}" },
+    PageMeta { slug: "power", href: "/chapter/power", title_en: "Power", title_ja: "\u{96fb}\u{529b}" },
+    PageMeta { slug: "infra-management", href: "/chapter/infra-management", title_en: "Management", title_ja: "\u{7ba1}\u{7406}" },
+    PageMeta { slug: "maintenance", href: "/chapter/maintenance", title_en: "Maintenance", title_ja: "\u{30e1}\u{30f3}\u{30c6}\u{30ca}\u{30f3}\u{30b9}" },
+    PageMeta { slug: "edges", href: "/chapter/edges", title_en: "Edges", title_ja: "\u{30a8}\u{30c3}\u{30b8}" },
+    PageMeta { slug: "site-events", href: "/chapter/site-events", title_en: "Site Events", title_ja: "\u{30b5}\u{30a4}\u{30c8}\u{30a4}\u{30d9}\u{30f3}\u{30c8}" },
+    PageMeta { slug: "detection", href: "/chapter/detection", title_en: "Detection", title_ja: "\u{691c}\u{51fa}" },
+    PageMeta { slug: "escalation", href: "/chapter/escalation", title_en: "Escalation", title_ja: "\u{30a8}\u{30b9}\u{30ab}\u{30ec}\u{30fc}\u{30b7}\u{30e7}\u{30f3}" },
+    PageMeta { slug: "root-causes", href: "/chapter/root-causes", title_en: "Root Causes", title_ja: "\u{6839}\u{672c}\u{539f}\u{56e0}" },
+    PageMeta { slug: "remediation", href: "/chapter/remediation", title_en: "Remediation", title_ja: "\u{4fee}\u{5fa9}" },
+    PageMeta { slug: "prevention", href: "/chapter/prevention", title_en: "Prevention", title_ja: "\u{4e88}\u{9632}" },
+    PageMeta { slug: "communication", href: "/chapter/communication", title_en: "Communication", title_ja: "\u{30b3}\u{30df}\u{30e5}\u{30cb}\u{30b1}\u{30fc}\u{30b7}\u{30e7}\u{30f3}" },
+    PageMeta { slug: "afterword", href: "/afterword", title_en: "Afterword", title_ja: "\u{3042}\u{3068}\u{304c}\u{304d}" },
+    PageMeta { slug: "colophon", href: "/colophon", title_en: "Colophon", title_ja: "\u{5965}\u{4ed8}" },
+];
+
+fn content_for(lang: Lang, slug: &str) -> &'static str {
+    match lang {
+        Lang::En => match slug {
+            "foreword" => content::foreword(),
+            "preface" => content::preface(),
+            "systems" => content::chapter_systems(),
+            "design" => content::chapter_design(),
+            "consensus" => content::chapter_consensus(),
+            "configuration" => content::chapter_configuration(),
+            "discovery" => content::chapter_discovery(),
+            "routing" => content::chapter_routing(),
+            "caching" => content::chapter_caching(),
+            "storage" => content::chapter_storage(),
+            "implementation" => content::chapter_implementation(),
+            "operation" => content::chapter_operation(),
+            "scheduling" => content::chapter_scheduling(),
+            "release" => content::chapter_release(),
+            "security" => content::chapter_security(),
+            "monitoring" => content::chapter_monitoring(),
+            "capacity" => content::chapter_capacity(),
+            "utilization" => content::chapter_utilization(),
+            "efficiency" => content::chapter_efficiency(),
+            "load-testing" => content::chapter_load_testing(),
+            "planning" => content::chapter_planning(),
+            "degradation" => content::chapter_degradation(),
+            "load-balancing" => content::chapter_load_balancing(),
+            "consistency" => content::chapter_consistency(),
+            "placement" => content::chapter_placement(),
+            "geo-replication" => content::chapter_geo_replication(),
+            "localization" => content::chapter_localization(),
+            "traffic" => content::chapter_traffic(),
+            "faults" => content::chapter_faults(),
+            "outages" => content::chapter_outages(),
+            "resources" => content::chapter_resources(),
+            "servers" => content::chapter_servers(),
+            "buildings" => content::chapter_buildings(),
+            "network" => content::chapter_network(),
+            "power" => content::chapter_power(),
+            "infra-management" => content::chapter_infra_management(),
+            "maintenance" => content::chapter_maintenance(),
+            "edges" => content::chapter_edges(),
+            "site-events" => content::chapter_site_events(),
+            "detection" => content::chapter_detection(),
+            "escalation" => content::chapter_escalation(),
+            "root-causes" => content::chapter_root_causes(),
+            "remediation" => content::chapter_remediation(),
+            "prevention" => content::chapter_prevention(),
+            "communication" => content::chapter_communication(),
+            "afterword" => content::afterword(),
+            "colophon" => content::colophon(),
+            _ => "<h1>Not Found</h1>",
+        },
+        Lang::Ja => match slug {
+            "foreword" => content_ja::foreword(),
+            "preface" => content_ja::preface(),
+            "systems" => content_ja::chapter_systems(),
+            "design" => content_ja::chapter_design(),
+            "consensus" => content_ja::chapter_consensus(),
+            "configuration" => content_ja::chapter_configuration(),
+            "discovery" => content_ja::chapter_discovery(),
+            "routing" => content_ja::chapter_routing(),
+            "caching" => content_ja::chapter_caching(),
+            "storage" => content_ja::chapter_storage(),
+            "implementation" => content_ja::chapter_implementation(),
+            "operation" => content_ja::chapter_operation(),
+            "scheduling" => content_ja::chapter_scheduling(),
+            "release" => content_ja::chapter_release(),
+            "security" => content_ja::chapter_security(),
+            "monitoring" => content_ja::chapter_monitoring(),
+            "capacity" => content_ja::chapter_capacity(),
+            "utilization" => content_ja::chapter_utilization(),
+            "efficiency" => content_ja::chapter_efficiency(),
+            "load-testing" => content_ja::chapter_load_testing(),
+            "planning" => content_ja::chapter_planning(),
+            "degradation" => content_ja::chapter_degradation(),
+            "load-balancing" => content_ja::chapter_load_balancing(),
+            "consistency" => content_ja::chapter_consistency(),
+            "placement" => content_ja::chapter_placement(),
+            "geo-replication" => content_ja::chapter_geo_replication(),
+            "localization" => content_ja::chapter_localization(),
+            "traffic" => content_ja::chapter_traffic(),
+            "faults" => content_ja::chapter_faults(),
+            "outages" => content_ja::chapter_outages(),
+            "resources" => content_ja::chapter_resources(),
+            "servers" => content_ja::chapter_servers(),
+            "buildings" => content_ja::chapter_buildings(),
+            "network" => content_ja::chapter_network(),
+            "power" => content_ja::chapter_power(),
+            "infra-management" => content_ja::chapter_infra_management(),
+            "maintenance" => content_ja::chapter_maintenance(),
+            "edges" => content_ja::chapter_edges(),
+            "site-events" => content_ja::chapter_site_events(),
+            "detection" => content_ja::chapter_detection(),
+            "escalation" => content_ja::chapter_escalation(),
+            "root-causes" => content_ja::chapter_root_causes(),
+            "remediation" => content_ja::chapter_remediation(),
+            "prevention" => content_ja::chapter_prevention(),
+            "communication" => content_ja::chapter_communication(),
+            "afterword" => content_ja::afterword(),
+            "colophon" => content_ja::colophon(),
+            _ => "<h1>Not Found</h1>",
+        },
+    }
+}
+
 fn parse_query_string(path: &str) -> (&str, HashMap<String, String>) {
     if let Some(idx) = path.find('?') {
         let base = &path[..idx];
@@ -172,78 +421,86 @@ fn get_or_create_user_id(headers: &str) -> (String, bool) {
 // ── Spectral color map ──────────────────────────────────────────────────────
 
 struct NavItem {
-    href: &'static str,
-    label: &'static str,
+    href: String,
+    label: String,
     color: &'static str,
 }
 
 enum NavEntry {
-    Part(&'static str),
+    Part(String),
     Chapter(NavItem),
     Separator,
 }
 
-fn book_nav_entries() -> Vec<NavEntry> {
+fn book_nav_entries(lang: Lang) -> Vec<NavEntry> {
+    let p = lang.prefix();
+    let l = |en: &str, ja: &str| -> String {
+        match lang { Lang::En => en.to_string(), Lang::Ja => ja.to_string() }
+    };
     vec![
-        NavEntry::Chapter(NavItem { href: "/foreword", label: "Foreword", color: "#888" }),
-        NavEntry::Chapter(NavItem { href: "/preface", label: "Preface", color: "#888" }),
-        NavEntry::Part("Part I: Fundamentals"),
-        NavEntry::Chapter(NavItem { href: "/chapter/systems", label: "1. Systems", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/design", label: "2. Design", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/consensus", label: "3. Consensus", color: "#06D6A0" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/configuration", label: "4. Configuration", color: "#3A86FF" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/discovery", label: "5. Discovery", color: "#F7B731" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/routing", label: "6. Routing", color: "#2A9D8F" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/caching", label: "7. Caching", color: "#7209B7" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/storage", label: "8. Storage", color: "#5E60CE" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/implementation", label: "9. Implementation", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/operation", label: "10. Operation", color: "#555" }),
-        NavEntry::Part("Part II: Management"),
-        NavEntry::Chapter(NavItem { href: "/chapter/scheduling", label: "11. Scheduling", color: "#FF6B35" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/release", label: "12. Release", color: "#4CC9F0" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/security", label: "13. Security", color: "#D62828" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/monitoring", label: "14. Monitoring", color: "#B5179E" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/capacity", label: "15. Capacity", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/utilization", label: "16. Utilization", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/efficiency", label: "17. Efficiency", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/load-testing", label: "18. Load Testing", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/planning", label: "19. Planning", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/degradation", label: "20. Degradation", color: "#555" }),
-        NavEntry::Part("Part III: Distribution"),
-        NavEntry::Chapter(NavItem { href: "/chapter/load-balancing", label: "21. Load Balancing", color: "#1B998B" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/consistency", label: "22. Consistency", color: "#A855F7" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/placement", label: "23. Placement", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/geo-replication", label: "24. Geo Replication", color: "#10B981" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/traffic", label: "25. Traffic", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/faults", label: "26. Faults", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/outages", label: "27. Outages", color: "#555" }),
-        NavEntry::Part("Part IV: Infrastructure"),
-        NavEntry::Chapter(NavItem { href: "/chapter/resources", label: "28. Resources", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/servers", label: "29. Servers", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/buildings", label: "30. Buildings", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/network", label: "31. Network", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/power", label: "32. Power", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/infra-management", label: "33. Management", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/maintenance", label: "34. Maintenance", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/edges", label: "35. Edges", color: "#555" }),
-        NavEntry::Part("Part V: Incident Management"),
-        NavEntry::Chapter(NavItem { href: "/chapter/site-events", label: "36. Site Events", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/detection", label: "37. Detection", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/escalation", label: "38. Escalation", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/root-causes", label: "39. Root Causes", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/remediation", label: "40. Remediation", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/prevention", label: "41. Prevention", color: "#555" }),
-        NavEntry::Chapter(NavItem { href: "/chapter/communication", label: "42. Communication", color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/foreword", p), label: l("Foreword", "\u{307e}\u{3048}\u{304c}\u{304d}"), color: "#888" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/preface", p), label: l("Preface", "\u{5e8f}\u{6587}"), color: "#888" }),
+        NavEntry::Part(l("Part I: Fundamentals", "\u{7b2c}I\u{90e8}: \u{57fa}\u{790e}")),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/systems", p), label: l("1. Systems", "1. \u{30b7}\u{30b9}\u{30c6}\u{30e0}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/design", p), label: l("2. Design", "2. \u{8a2d}\u{8a08}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/consensus", p), label: l("3. Consensus", "3. \u{30b3}\u{30f3}\u{30bb}\u{30f3}\u{30b5}\u{30b9}"), color: "#06D6A0" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/configuration", p), label: l("4. Configuration", "4. \u{69cb}\u{6210}\u{7ba1}\u{7406}"), color: "#3A86FF" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/discovery", p), label: l("5. Discovery", "5. \u{30c7}\u{30a3}\u{30b9}\u{30ab}\u{30d0}\u{30ea}"), color: "#F7B731" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/routing", p), label: l("6. Routing", "6. \u{30eb}\u{30fc}\u{30c6}\u{30a3}\u{30f3}\u{30b0}"), color: "#2A9D8F" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/caching", p), label: l("7. Caching", "7. \u{30ad}\u{30e3}\u{30c3}\u{30b7}\u{30f3}\u{30b0}"), color: "#7209B7" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/storage", p), label: l("8. Storage", "8. \u{30b9}\u{30c8}\u{30ec}\u{30fc}\u{30b8}"), color: "#5E60CE" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/implementation", p), label: l("9. Implementation", "9. \u{5b9f}\u{88c5}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/operation", p), label: l("10. Operation", "10. \u{904b}\u{7528}"), color: "#555" }),
+        NavEntry::Part(l("Part II: Management", "\u{7b2c}II\u{90e8}: \u{7ba1}\u{7406}")),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/scheduling", p), label: l("11. Scheduling", "11. \u{30b9}\u{30b1}\u{30b8}\u{30e5}\u{30fc}\u{30ea}\u{30f3}\u{30b0}"), color: "#FF6B35" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/release", p), label: l("12. Release", "12. \u{30ea}\u{30ea}\u{30fc}\u{30b9}"), color: "#4CC9F0" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/security", p), label: l("13. Security", "13. \u{30bb}\u{30ad}\u{30e5}\u{30ea}\u{30c6}\u{30a3}"), color: "#D62828" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/monitoring", p), label: l("14. Monitoring", "14. \u{30e2}\u{30cb}\u{30bf}\u{30ea}\u{30f3}\u{30b0}"), color: "#B5179E" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/capacity", p), label: l("15. Capacity", "15. \u{30ad}\u{30e3}\u{30d1}\u{30b7}\u{30c6}\u{30a3}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/utilization", p), label: l("16. Utilization", "16. \u{5229}\u{7528}\u{7387}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/efficiency", p), label: l("17. Efficiency", "17. \u{52b9}\u{7387}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/load-testing", p), label: l("18. Load Testing", "18. \u{8ca0}\u{8377}\u{30c6}\u{30b9}\u{30c8}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/planning", p), label: l("19. Planning", "19. \u{8a08}\u{753b}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/degradation", p), label: l("20. Degradation", "20. \u{7e2e}\u{9000}\u{904b}\u{8ee2}"), color: "#555" }),
+        NavEntry::Part(l("Part III: Distribution", "\u{7b2c}III\u{90e8}: \u{5206}\u{6563}")),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/load-balancing", p), label: l("21. Load Balancing", "21. \u{30ed}\u{30fc}\u{30c9}\u{30d0}\u{30e9}\u{30f3}\u{30b7}\u{30f3}\u{30b0}"), color: "#1B998B" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/consistency", p), label: l("22. Consistency", "22. \u{6574}\u{5408}\u{6027}"), color: "#A855F7" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/placement", p), label: l("23. Placement", "23. \u{914d}\u{7f6e}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/geo-replication", p), label: l("24. Geo Replication", "24. \u{5730}\u{7406}\u{30ec}\u{30d7}\u{30ea}\u{30b1}\u{30fc}\u{30b7}\u{30e7}\u{30f3}"), color: "#10B981" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/localization", p), label: l("25. Localization", "25. \u{30ed}\u{30fc}\u{30ab}\u{30e9}\u{30a4}\u{30bc}\u{30fc}\u{30b7}\u{30e7}\u{30f3}"), color: "#F472B6" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/traffic", p), label: l("26. Traffic", "26. \u{30c8}\u{30e9}\u{30d5}\u{30a3}\u{30c3}\u{30af}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/faults", p), label: l("27. Faults", "27. \u{969c}\u{5bb3}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/outages", p), label: l("28. Outages", "28. \u{505c}\u{6b62}"), color: "#555" }),
+        NavEntry::Part(l("Part IV: Infrastructure", "\u{7b2c}IV\u{90e8}: \u{30a4}\u{30f3}\u{30d5}\u{30e9}")),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/resources", p), label: l("29. Resources", "29. \u{30ea}\u{30bd}\u{30fc}\u{30b9}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/servers", p), label: l("30. Servers", "30. \u{30b5}\u{30fc}\u{30d0}\u{30fc}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/buildings", p), label: l("31. Buildings", "31. \u{5efa}\u{7269}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/network", p), label: l("32. Network", "32. \u{30cd}\u{30c3}\u{30c8}\u{30ef}\u{30fc}\u{30af}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/power", p), label: l("33. Power", "33. \u{96fb}\u{529b}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/infra-management", p), label: l("34. Management", "34. \u{7ba1}\u{7406}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/maintenance", p), label: l("35. Maintenance", "35. \u{30e1}\u{30f3}\u{30c6}\u{30ca}\u{30f3}\u{30b9}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/edges", p), label: l("36. Edges", "36. \u{30a8}\u{30c3}\u{30b8}"), color: "#555" }),
+        NavEntry::Part(l("Part V: Incident Management", "\u{7b2c}V\u{90e8}: \u{30a4}\u{30f3}\u{30b7}\u{30c7}\u{30f3}\u{30c8}\u{7ba1}\u{7406}")),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/site-events", p), label: l("37. Site Events", "37. \u{30b5}\u{30a4}\u{30c8}\u{30a4}\u{30d9}\u{30f3}\u{30c8}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/detection", p), label: l("38. Detection", "38. \u{691c}\u{51fa}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/escalation", p), label: l("39. Escalation", "39. \u{30a8}\u{30b9}\u{30ab}\u{30ec}\u{30fc}\u{30b7}\u{30e7}\u{30f3}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/root-causes", p), label: l("40. Root Causes", "40. \u{6839}\u{672c}\u{539f}\u{56e0}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/remediation", p), label: l("41. Remediation", "41. \u{4fee}\u{5fa9}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/prevention", p), label: l("42. Prevention", "42. \u{4e88}\u{9632}"), color: "#555" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/chapter/communication", p), label: l("43. Communication", "43. \u{30b3}\u{30df}\u{30e5}\u{30cb}\u{30b1}\u{30fc}\u{30b7}\u{30e7}\u{30f3}"), color: "#555" }),
         NavEntry::Separator,
-        NavEntry::Chapter(NavItem { href: "/afterword", label: "Afterword", color: "#888" }),
-        NavEntry::Chapter(NavItem { href: "/colophon", label: "Colophon", color: "#888" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/afterword", p), label: l("Afterword", "\u{3042}\u{3068}\u{304c}\u{304d}"), color: "#888" }),
+        NavEntry::Chapter(NavItem { href: format!("{}/colophon", p), label: l("Colophon", "\u{5965}\u{4ed8}"), color: "#888" }),
     ]
 }
 
 // ── Page templates ──────────────────────────────────────────────────────────
 
-fn book_page(title: &str, slug: &str, active_href: &str, chapter_content: &str) -> String {
-    let nav_html: String = book_nav_entries()
+fn book_page(title: &str, slug: &str, active_href: &str, chapter_content: &str, lang: Lang) -> String {
+    let lang_code = lang.code();
+    let lang_prefix = lang.prefix();
+    let full_href = format!("{}{}", lang_prefix, active_href);
+    let nav_html: String = book_nav_entries(lang)
         .iter()
         .map(|entry| match entry {
             NavEntry::Part(label) => format!(
@@ -252,7 +509,7 @@ fn book_page(title: &str, slug: &str, active_href: &str, chapter_content: &str) 
             ),
             NavEntry::Separator => r#"<hr class="nav-sep">"#.to_string(),
             NavEntry::Chapter(item) => {
-                let active = if item.href == active_href { " class=\"nav-active\"" } else { "" };
+                let active = if item.href == full_href { " class=\"nav-active\"" } else { "" };
                 format!(
                     r#"<a href="{}" {}><span class="nav-dot" style="background:{};"></span>{}</a>"#,
                     item.href, active, item.color, item.label
@@ -262,22 +519,30 @@ fn book_page(title: &str, slug: &str, active_href: &str, chapter_content: &str) 
         .collect::<Vec<_>>()
         .join("\n            ");
 
+    let switch_href = format!("{}{}", lang.other().prefix(), active_href);
+    let switch_label = match lang {
+        Lang::En => "\u{65e5}\u{672c}\u{8a9e}",
+        Lang::Ja => "English",
+    };
+
     format!(
         r##"<!DOCTYPE html>
-<html lang="en">
+<html lang="{lang_code}">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{title} - The Planetary Scale Computer</title>
-    <meta name="description" content="{title} — The Planetary Scale Computer">
-    <link rel="canonical" href="https://p.jjm.net{active_href}">
-    <meta property="og:title" content="{title} - The Planetary Scale Computer">
-    <meta property="og:description" content="{title} — The Planetary Scale Computer">
+    <title>{title} - {site_title}</title>
+    <meta name="description" content="{title} — {site_title}">
+    <link rel="canonical" href="https://p.jjm.net{full_href}">
+    <link rel="alternate" hreflang="en" href="https://p.jjm.net{active_href}">
+    <link rel="alternate" hreflang="ja" href="https://p.jjm.net/ja{active_href}">
+    <meta property="og:title" content="{title} - {site_title}">
+    <meta property="og:description" content="{title} — {site_title}">
     <meta property="og:type" content="article">
-    <meta property="og:url" content="https://p.jjm.net{active_href}">
-    <meta property="og:site_name" content="The Planetary Scale Computer">
+    <meta property="og:url" content="https://p.jjm.net{full_href}">
+    <meta property="og:site_name" content="{site_title}">
     <meta name="twitter:card" content="summary">
-    <meta name="twitter:title" content="{title} - The Planetary Scale Computer">
+    <meta name="twitter:title" content="{title} - {site_title}">
     <style>
         :root {{
             --bg: #fffff8;
@@ -557,8 +822,11 @@ fn book_page(title: &str, slug: &str, active_href: &str, chapter_content: &str) 
 </head>
 <body>
     <nav class="sidebar">
-        <div class="book-title"><a href="/">The Planetary Scale Computer</a></div>
+        <div class="book-title"><a href="{lang_prefix}/">{site_title}</a></div>
         {nav_html}
+        <div class="dashboard-link">
+            <a href="{switch_href}">{switch_label}</a>
+        </div>
         <div class="dashboard-link">
             <a href="/dashboard">System Dashboard</a>
         </div>
@@ -583,7 +851,7 @@ fn book_page(title: &str, slug: &str, active_href: &str, chapter_content: &str) 
 
     <script>
     (function() {{
-        var PAGE_SLUG = "{slug}";
+        var PAGE_SLUG = "{lang_code}:{slug}";
         var toolbar = document.getElementById('highlight-toolbar');
         var content = document.getElementById('chapter-content');
         var highlights = [];
@@ -730,14 +998,23 @@ fn book_page(title: &str, slug: &str, active_href: &str, chapter_content: &str) 
 </body>
 </html>"##,
         title = title,
+        site_title = lang.site_title(),
+        lang_code = lang_code,
+        lang_prefix = lang_prefix,
+        full_href = full_href,
+        active_href = active_href,
         nav_html = nav_html,
         chapter_content = chapter_content,
         slug = slug,
+        switch_href = switch_href,
+        switch_label = switch_label,
     )
 }
 
-fn landing_page() -> String {
-    let items: String = book_nav_entries()
+fn landing_page(lang: Lang) -> String {
+    let lang_code = lang.code();
+    let lang_prefix = lang.prefix();
+    let items: String = book_nav_entries(lang)
         .iter()
         .map(|entry| match entry {
             NavEntry::Part(label) => format!(
@@ -756,23 +1033,35 @@ fn landing_page() -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
+    let site_title = lang.site_title();
+    let switch_href = format!("{}/", lang.other().prefix());
+    let switch_label = match lang {
+        Lang::En => "\u{65e5}\u{672c}\u{8a9e}",
+        Lang::Ja => "English",
+    };
+    let description_en = "A self-describing planetary scale computer. The book is served by the very systems it describes \u{2014} microservices handling discovery, routing, configuration, caching, storage, and monitoring, all built from scratch in Rust.";
+    let description_ja = "\u{81ea}\u{5df1}\u{8a18}\u{8ff0}\u{578b}\u{306e}\u{60d1}\u{661f}\u{898f}\u{6a21}\u{30b3}\u{30f3}\u{30d4}\u{30e5}\u{30fc}\u{30bf}\u{3002}\u{3053}\u{306e}\u{66f8}\u{7c4d}\u{306f}\u{3001}\u{305d}\u{308c}\u{81ea}\u{4f53}\u{304c}\u{8a18}\u{8ff0}\u{3059}\u{308b}\u{30b7}\u{30b9}\u{30c6}\u{30e0}\u{306b}\u{3088}\u{3063}\u{3066}\u{914d}\u{4fe1}\u{3055}\u{308c}\u{3066}\u{3044}\u{307e}\u{3059}\u{3002}";
+    let description = match lang { Lang::En => description_en, Lang::Ja => description_ja };
+
     format!(
         r##"<!DOCTYPE html>
-<html lang="en">
+<html lang="{lang_code}">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>The Planetary Scale Computer</title>
-    <meta name="description" content="A self-describing planetary scale computer. The book is served by the very systems it describes — microservices handling discovery, routing, configuration, caching, storage, and monitoring, all built from scratch in Rust.">
-    <link rel="canonical" href="https://p.jjm.net/">
-    <meta property="og:title" content="The Planetary Scale Computer">
-    <meta property="og:description" content="A self-describing planetary scale computer. The book is served by the very systems it describes — microservices handling discovery, routing, configuration, caching, storage, and monitoring, all built from scratch in Rust.">
+    <title>{site_title}</title>
+    <meta name="description" content="{description}">
+    <link rel="canonical" href="https://p.jjm.net{lang_prefix}/">
+    <link rel="alternate" hreflang="en" href="https://p.jjm.net/">
+    <link rel="alternate" hreflang="ja" href="https://p.jjm.net/ja/">
+    <meta property="og:title" content="{site_title}">
+    <meta property="og:description" content="{description}">
     <meta property="og:type" content="website">
-    <meta property="og:url" content="https://p.jjm.net/">
-    <meta property="og:site_name" content="The Planetary Scale Computer">
+    <meta property="og:url" content="https://p.jjm.net{lang_prefix}/">
+    <meta property="og:site_name" content="{site_title}">
     <meta name="twitter:card" content="summary">
-    <meta name="twitter:title" content="The Planetary Scale Computer">
-    <meta name="twitter:description" content="A self-describing planetary scale computer. The book is served by the very systems it describes.">
+    <meta name="twitter:title" content="{site_title}">
+    <meta name="twitter:description" content="{description}">
     <style>
         :root {{
             --bg: #fffff8;
@@ -959,10 +1248,91 @@ fn landing_page() -> String {
 <body>
     <div class="landing">
         <p class="author">Justin J. Meza</p>
-        <h1>The Planetary Scale Computer</h1>
-        <p class="subtitle">First Edition</p>
-        <p class="description">
-            This site is a self-describing planetary scale computer.  The book
+        <h1>{site_title}</h1>
+        <p class="subtitle">{subtitle}</p>
+        <p class="description">{landing_desc}</p>
+        <input type="radio" name="idx" id="tab-index" checked class="tab-radio">
+        <input type="radio" name="idx" id="tab-reverse" class="tab-radio">
+        <div class="tab-bar">
+            <label for="tab-index" class="tab-label">{tab_index}</label>
+            <label for="tab-reverse" class="tab-label">{tab_reverse}</label>
+        </div>
+        <div class="tab-panel tab-panel-index">
+            {items}
+        </div>
+        <div class="tab-panel tab-panel-reverse">
+            <div class="si-entry">
+                <div class="si-name"><span class="si-dot" style="background:#7209B7"></span> caching</div>
+                <div class="si-chapters"><a href="{lang_prefix}/chapter/caching">7. Caching</a> &middot; <a href="{lang_prefix}/chapter/storage">8. Storage</a> &middot; <a href="{lang_prefix}/chapter/design">2. Design</a> &middot; <a href="{lang_prefix}/chapter/degradation">20. Degradation</a></div>
+            </div>
+            <div class="si-entry">
+                <div class="si-name"><span class="si-dot" style="background:#3A86FF"></span> configuration</div>
+                <div class="si-chapters"><a href="{lang_prefix}/chapter/configuration">4. Configuration</a> &middot; <a href="{lang_prefix}/chapter/design">2. Design</a> &middot; <a href="{lang_prefix}/chapter/operation">10. Operation</a></div>
+            </div>
+            <div class="si-entry">
+                <div class="si-name"><span class="si-dot" style="background:#06D6A0"></span> consensus</div>
+                <div class="si-chapters"><a href="{lang_prefix}/chapter/consensus">3. Consensus</a> &middot; <a href="{lang_prefix}/chapter/consistency">22. Consistency</a></div>
+            </div>
+            <div class="si-entry">
+                <div class="si-name"><span class="si-dot" style="background:#F7B731"></span> discovery</div>
+                <div class="si-chapters"><a href="{lang_prefix}/chapter/discovery">5. Discovery</a> &middot; <a href="{lang_prefix}/chapter/routing">6. Routing</a> &middot; <a href="{lang_prefix}/chapter/operation">10. Operation</a> &middot; <a href="{lang_prefix}/chapter/consensus">3. Consensus</a></div>
+            </div>
+            <div class="si-entry">
+                <div class="si-name"><span class="si-dot" style="background:#00B4D8"></span> echo</div>
+                <div class="si-chapters"><a href="{lang_prefix}/chapter/systems">1. Systems</a> &middot; <a href="{lang_prefix}/chapter/discovery">5. Discovery</a></div>
+            </div>
+            <div class="si-entry">
+                <div class="si-name"><span class="si-dot" style="background:#1B998B"></span> loadbalancer</div>
+                <div class="si-chapters"><a href="{lang_prefix}/chapter/load-balancing">21. Load Balancing</a> &middot; <a href="{lang_prefix}/chapter/routing">6. Routing</a> &middot; <a href="{lang_prefix}/chapter/traffic">26. Traffic</a></div>
+            </div>
+            <div class="si-entry">
+                <div class="si-name"><span class="si-dot" style="background:#B5179E"></span> monitoring</div>
+                <div class="si-chapters"><a href="{lang_prefix}/chapter/monitoring">14. Monitoring</a> &middot; <a href="{lang_prefix}/chapter/operation">10. Operation</a> &middot; <a href="{lang_prefix}/chapter/utilization">16. Utilization</a> &middot; <a href="{lang_prefix}/chapter/detection">38. Detection</a></div>
+            </div>
+            <div class="si-entry">
+                <div class="si-name"><span class="si-dot" style="background:#E63946"></span> normalization</div>
+                <div class="si-chapters"><a href="{lang_prefix}/chapter/systems">1. Systems</a></div>
+            </div>
+            <div class="si-entry">
+                <div class="si-name"><span class="si-dot" style="background:#4CC9F0"></span> release</div>
+                <div class="si-chapters"><a href="{lang_prefix}/chapter/release">12. Release</a> &middot; <a href="{lang_prefix}/chapter/operation">10. Operation</a></div>
+            </div>
+            <div class="si-entry">
+                <div class="si-name"><span class="si-dot" style="background:#2A9D8F"></span> routing</div>
+                <div class="si-chapters"><a href="{lang_prefix}/chapter/routing">6. Routing</a> &middot; <a href="{lang_prefix}/chapter/discovery">5. Discovery</a> &middot; <a href="{lang_prefix}/chapter/load-balancing">21. Load Balancing</a> &middot; <a href="{lang_prefix}/chapter/monitoring">14. Monitoring</a></div>
+            </div>
+            <div class="si-entry">
+                <div class="si-name"><span class="si-dot" style="background:#F4845F"></span> rpc</div>
+                <div class="si-chapters"><a href="{lang_prefix}/chapter/systems">1. Systems</a> &middot; <a href="{lang_prefix}/chapter/routing">6. Routing</a></div>
+            </div>
+            <div class="si-entry">
+                <div class="si-name"><span class="si-dot" style="background:#FF6B35"></span> scheduling</div>
+                <div class="si-chapters"><a href="{lang_prefix}/chapter/scheduling">11. Scheduling</a> &middot; <a href="{lang_prefix}/chapter/operation">10. Operation</a> &middot; <a href="{lang_prefix}/chapter/planning">19. Planning</a></div>
+            </div>
+            <div class="si-entry">
+                <div class="si-name"><span class="si-dot" style="background:#D62828"></span> security</div>
+                <div class="si-chapters"><a href="{lang_prefix}/chapter/security">13. Security</a> &middot; <a href="{lang_prefix}/chapter/operation">10. Operation</a></div>
+            </div>
+            <div class="si-entry">
+                <div class="si-name"><span class="si-dot" style="background:#5E60CE"></span> storage</div>
+                <div class="si-chapters"><a href="{lang_prefix}/chapter/storage">8. Storage</a> &middot; <a href="{lang_prefix}/chapter/caching">7. Caching</a> &middot; <a href="{lang_prefix}/chapter/design">2. Design</a> &middot; <a href="{lang_prefix}/chapter/consistency">22. Consistency</a></div>
+            </div>
+        </div>
+        <div class="dashboard-link" style="display:flex; justify-content:space-between;">
+            <a href="{switch_href}">{switch_label}</a>
+            <a href="/dashboard">System Dashboard &rarr;</a>
+        </div>
+    </div>
+</body>
+</html>"##,
+        site_title = site_title,
+        lang_code = lang_code,
+        lang_prefix = lang_prefix,
+        description = description,
+        subtitle = match lang { Lang::En => "First Edition", Lang::Ja => "\u{521d}\u{7248}" },
+        landing_desc = match lang {
+            Lang::En => format!(
+                r#"This site is a self-describing planetary scale computer.  The book
             you are reading is served by the very systems it describes &mdash;
             a constellation of microservices handling
             <a href="/chapter/discovery">discovery</a>,
@@ -976,82 +1346,39 @@ fn landing_page() -> String {
             <a href="/dashboard">system dashboard</a> to see them in action.
             The <a href="https://github.com/justinmeza/planetary">source code</a>
             is freely available &mdash; readers are encouraged to run the system
-            themselves and explore.
-        </p>
-        <input type="radio" name="idx" id="tab-index" checked class="tab-radio">
-        <input type="radio" name="idx" id="tab-reverse" class="tab-radio">
-        <div class="tab-bar">
-            <label for="tab-index" class="tab-label">Index</label>
-            <label for="tab-reverse" class="tab-label">Reverse Index</label>
-        </div>
-        <div class="tab-panel tab-panel-index">
-            {items}
-        </div>
-        <div class="tab-panel tab-panel-reverse">
-            <div class="si-entry">
-                <div class="si-name"><span class="si-dot" style="background:#7209B7"></span> caching</div>
-                <div class="si-chapters"><a href="/chapter/caching">7. Caching</a> &middot; <a href="/chapter/storage">8. Storage</a> &middot; <a href="/chapter/design">2. Design</a> &middot; <a href="/chapter/degradation">20. Degradation</a></div>
-            </div>
-            <div class="si-entry">
-                <div class="si-name"><span class="si-dot" style="background:#3A86FF"></span> configuration</div>
-                <div class="si-chapters"><a href="/chapter/configuration">4. Configuration</a> &middot; <a href="/chapter/design">2. Design</a> &middot; <a href="/chapter/operation">10. Operation</a></div>
-            </div>
-            <div class="si-entry">
-                <div class="si-name"><span class="si-dot" style="background:#06D6A0"></span> consensus</div>
-                <div class="si-chapters"><a href="/chapter/consensus">3. Consensus</a> &middot; <a href="/chapter/consistency">22. Consistency</a></div>
-            </div>
-            <div class="si-entry">
-                <div class="si-name"><span class="si-dot" style="background:#F7B731"></span> discovery</div>
-                <div class="si-chapters"><a href="/chapter/discovery">5. Discovery</a> &middot; <a href="/chapter/routing">6. Routing</a> &middot; <a href="/chapter/operation">10. Operation</a> &middot; <a href="/chapter/consensus">3. Consensus</a></div>
-            </div>
-            <div class="si-entry">
-                <div class="si-name"><span class="si-dot" style="background:#00B4D8"></span> echo</div>
-                <div class="si-chapters"><a href="/chapter/systems">1. Systems</a> &middot; <a href="/chapter/discovery">5. Discovery</a></div>
-            </div>
-            <div class="si-entry">
-                <div class="si-name"><span class="si-dot" style="background:#1B998B"></span> loadbalancer</div>
-                <div class="si-chapters"><a href="/chapter/load-balancing">21. Load Balancing</a> &middot; <a href="/chapter/routing">6. Routing</a> &middot; <a href="/chapter/traffic">25. Traffic</a></div>
-            </div>
-            <div class="si-entry">
-                <div class="si-name"><span class="si-dot" style="background:#B5179E"></span> monitoring</div>
-                <div class="si-chapters"><a href="/chapter/monitoring">14. Monitoring</a> &middot; <a href="/chapter/operation">10. Operation</a> &middot; <a href="/chapter/utilization">16. Utilization</a> &middot; <a href="/chapter/detection">36. Detection</a></div>
-            </div>
-            <div class="si-entry">
-                <div class="si-name"><span class="si-dot" style="background:#E63946"></span> normalization</div>
-                <div class="si-chapters"><a href="/chapter/systems">1. Systems</a></div>
-            </div>
-            <div class="si-entry">
-                <div class="si-name"><span class="si-dot" style="background:#4CC9F0"></span> release</div>
-                <div class="si-chapters"><a href="/chapter/release">12. Release</a> &middot; <a href="/chapter/operation">10. Operation</a></div>
-            </div>
-            <div class="si-entry">
-                <div class="si-name"><span class="si-dot" style="background:#2A9D8F"></span> routing</div>
-                <div class="si-chapters"><a href="/chapter/routing">6. Routing</a> &middot; <a href="/chapter/discovery">5. Discovery</a> &middot; <a href="/chapter/load-balancing">21. Load Balancing</a> &middot; <a href="/chapter/monitoring">14. Monitoring</a></div>
-            </div>
-            <div class="si-entry">
-                <div class="si-name"><span class="si-dot" style="background:#F4845F"></span> rpc</div>
-                <div class="si-chapters"><a href="/chapter/systems">1. Systems</a> &middot; <a href="/chapter/routing">6. Routing</a></div>
-            </div>
-            <div class="si-entry">
-                <div class="si-name"><span class="si-dot" style="background:#FF6B35"></span> scheduling</div>
-                <div class="si-chapters"><a href="/chapter/scheduling">11. Scheduling</a> &middot; <a href="/chapter/operation">10. Operation</a> &middot; <a href="/chapter/planning">19. Planning</a></div>
-            </div>
-            <div class="si-entry">
-                <div class="si-name"><span class="si-dot" style="background:#D62828"></span> security</div>
-                <div class="si-chapters"><a href="/chapter/security">13. Security</a> &middot; <a href="/chapter/operation">10. Operation</a></div>
-            </div>
-            <div class="si-entry">
-                <div class="si-name"><span class="si-dot" style="background:#5E60CE"></span> storage</div>
-                <div class="si-chapters"><a href="/chapter/storage">8. Storage</a> &middot; <a href="/chapter/caching">7. Caching</a> &middot; <a href="/chapter/design">2. Design</a> &middot; <a href="/chapter/consistency">22. Consistency</a></div>
-            </div>
-        </div>
-        <div class="dashboard-link">
-            <a href="/dashboard">System Dashboard &rarr;</a>
-        </div>
-    </div>
-</body>
-</html>"##,
-        items = items
+            themselves and explore."#),
+            Lang::Ja => format!(
+                r#"{ja_desc}
+            <a href="/ja/chapter/discovery">{ja_disc}</a>{ja_comma}
+            <a href="/ja/chapter/routing">{ja_rout}</a>{ja_comma}
+            <a href="/ja/chapter/configuration">{ja_conf}</a>{ja_comma}
+            <a href="/ja/chapter/caching">{ja_cach}</a>{ja_comma}
+            <a href="/ja/chapter/storage">{ja_stor}</a>{ja_comma}
+            <a href="/ja/chapter/monitoring">{ja_moni}</a>
+            {ja_suffix}
+            <a href="/dashboard">{ja_dash}</a>{ja_action}
+            <a href="https://github.com/justinmeza/planetary">{ja_src}</a>
+            {ja_avail}"#,
+                ja_desc = "\u{3053}\u{306e}\u{30b5}\u{30a4}\u{30c8}\u{306f}\u{81ea}\u{5df1}\u{8a18}\u{8ff0}\u{578b}\u{306e}\u{60d1}\u{661f}\u{898f}\u{6a21}\u{30b3}\u{30f3}\u{30d4}\u{30e5}\u{30fc}\u{30bf}\u{3067}\u{3059}\u{3002}\u{3053}\u{306e}\u{66f8}\u{7c4d}\u{306f}\u{3001}\u{305d}\u{308c}\u{81ea}\u{4f53}\u{304c}\u{8a18}\u{8ff0}\u{3059}\u{308b}\u{30b7}\u{30b9}\u{30c6}\u{30e0}\u{306b}\u{3088}\u{3063}\u{3066}\u{914d}\u{4fe1}\u{3055}\u{308c}\u{3066}\u{3044}\u{307e}\u{3059}\u{3002}",
+                ja_disc = "\u{30c7}\u{30a3}\u{30b9}\u{30ab}\u{30d0}\u{30ea}",
+                ja_rout = "\u{30eb}\u{30fc}\u{30c6}\u{30a3}\u{30f3}\u{30b0}",
+                ja_conf = "\u{69cb}\u{6210}\u{7ba1}\u{7406}",
+                ja_cach = "\u{30ad}\u{30e3}\u{30c3}\u{30b7}\u{30f3}\u{30b0}",
+                ja_stor = "\u{30b9}\u{30c8}\u{30ec}\u{30fc}\u{30b8}",
+                ja_moni = "\u{30e2}\u{30cb}\u{30bf}\u{30ea}\u{30f3}\u{30b0}",
+                ja_comma = "\u{3001}",
+                ja_suffix = "\u{3059}\u{3079}\u{3066}\u{30bc}\u{30ed}\u{304b}\u{3089}\u{69cb}\u{7bc9}\u{3055}\u{308c}\u{3001}\u{4eca}\u{307e}\u{3055}\u{306b}\u{7a3c}\u{50cd}\u{4e2d}\u{3067}\u{3059}\u{3002}\u{5404}\u{7ae0}\u{3092}\u{8aad}\u{3093}\u{3067}\u{4ed5}\u{7d44}\u{307f}\u{3092}\u{7406}\u{89e3}\u{3057}\u{3001}",
+                ja_dash = "\u{30b7}\u{30b9}\u{30c6}\u{30e0}\u{30c0}\u{30c3}\u{30b7}\u{30e5}\u{30dc}\u{30fc}\u{30c9}",
+                ja_action = "\u{3067}\u{5b9f}\u{969b}\u{306e}\u{52d5}\u{4f5c}\u{3092}\u{78ba}\u{8a8d}\u{3067}\u{304d}\u{307e}\u{3059}\u{3002}",
+                ja_src = "\u{30bd}\u{30fc}\u{30b9}\u{30b3}\u{30fc}\u{30c9}",
+                ja_avail = "\u{306f}\u{81ea}\u{7531}\u{306b}\u{5229}\u{7528}\u{3067}\u{304d}\u{307e}\u{3059}\u{3002}",
+            ),
+        },
+        tab_index = match lang { Lang::En => "Index", Lang::Ja => "\u{76ee}\u{6b21}" },
+        tab_reverse = match lang { Lang::En => "Reverse Index", Lang::Ja => "\u{9006}\u{5f15}\u{304d}" },
+        items = items,
+        switch_href = switch_href,
+        switch_label = switch_label,
     )
 }
 
@@ -2654,19 +2981,30 @@ async fn page_regions() -> String {
 // ── SEO helpers ─────────────────────────────────────────────────────────────
 
 fn generate_sitemap() -> String {
-    let mut urls = vec!["/".to_string()];
-    for entry in book_nav_entries() {
+    let mut hrefs = vec!["/".to_string()];
+    for entry in book_nav_entries(Lang::En) {
         if let NavEntry::Chapter(item) = entry {
-            urls.push(item.href.to_string());
+            hrefs.push(item.href.clone());
         }
     }
     let mut xml = String::from(r#"<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:xhtml="http://www.w3.org/1999/xhtml">
 "#);
-    for url in &urls {
+    for href in &hrefs {
         xml.push_str(&format!(
-            "  <url><loc>https://p.jjm.net{}</loc></url>\n",
-            url
+            r#"  <url>
+    <loc>https://p.jjm.net{href}</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="https://p.jjm.net{href}"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://p.jjm.net/ja{href}"/>
+  </url>
+  <url>
+    <loc>https://p.jjm.net/ja{href}</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="https://p.jjm.net{href}"/>
+    <xhtml:link rel="alternate" hreflang="ja" href="https://p.jjm.net/ja{href}"/>
+  </url>
+"#,
+            href = href
         ));
     }
     xml.push_str("</urlset>\n");
@@ -2688,204 +3026,31 @@ async fn handle_request(
         cookies.push(format!("user_id={}; Path=/; Max-Age=31536000", user_id));
     }
 
-    let (status, html) = match (method, base_path) {
-        // ── Book pages ──
-        ("GET", "/") => (200, landing_page()),
-        ("GET", "/foreword") => (
-            200,
-            book_page("Foreword", "foreword", "/foreword", content::foreword()),
-        ),
-        ("GET", "/preface") => (
-            200,
-            book_page("Preface", "preface", "/preface", content::preface()),
-        ),
-        ("GET", "/chapter/systems") => (
-            200,
-            book_page("Systems", "systems", "/chapter/systems", content::chapter_systems()),
-        ),
-        ("GET", "/chapter/configuration") => (
-            200,
-            book_page(
-                "Configuration",
-                "configuration",
-                "/chapter/configuration",
-                content::chapter_configuration(),
-            ),
-        ),
-        ("GET", "/chapter/caching") => (
-            200,
-            book_page("Caching", "caching", "/chapter/caching", content::chapter_caching()),
-        ),
-        ("GET", "/chapter/storage") => (
-            200,
-            book_page("Storage", "storage", "/chapter/storage", content::chapter_storage()),
-        ),
-        ("GET", "/chapter/design") => (
-            200,
-            book_page("Design", "design", "/chapter/design", content::chapter_design()),
-        ),
-        ("GET", "/chapter/consensus") => (
-            200,
-            book_page("Consensus", "consensus", "/chapter/consensus", content::chapter_consensus()),
-        ),
-        ("GET", "/chapter/discovery") => (
-            200,
-            book_page("Discovery", "discovery", "/chapter/discovery", content::chapter_discovery()),
-        ),
-        ("GET", "/chapter/routing") => (
-            200,
-            book_page("Routing", "routing", "/chapter/routing", content::chapter_routing()),
-        ),
-        ("GET", "/chapter/implementation") => (
-            200,
-            book_page("Implementation", "implementation", "/chapter/implementation", content::chapter_implementation()),
-        ),
-        ("GET", "/chapter/operation") => (
-            200,
-            book_page("Operation", "operation", "/chapter/operation", content::chapter_operation()),
-        ),
-        ("GET", "/chapter/scheduling") => (
-            200,
-            book_page("Scheduling", "scheduling", "/chapter/scheduling", content::chapter_scheduling()),
-        ),
-        ("GET", "/chapter/release") => (
-            200,
-            book_page("Release", "release", "/chapter/release", content::chapter_release()),
-        ),
-        ("GET", "/chapter/security") => (
-            200,
-            book_page("Security", "security", "/chapter/security", content::chapter_security()),
-        ),
-        ("GET", "/chapter/monitoring") => (
-            200,
-            book_page(
-                "Monitoring",
-                "monitoring",
-                "/chapter/monitoring",
-                content::chapter_monitoring(),
-            ),
-        ),
-        ("GET", "/chapter/capacity") => (
-            200,
-            book_page("Capacity", "capacity", "/chapter/capacity", content::chapter_capacity()),
-        ),
-        ("GET", "/chapter/utilization") => (
-            200,
-            book_page("Utilization", "utilization", "/chapter/utilization", content::chapter_utilization()),
-        ),
-        ("GET", "/chapter/efficiency") => (
-            200,
-            book_page("Efficiency", "efficiency", "/chapter/efficiency", content::chapter_efficiency()),
-        ),
-        ("GET", "/chapter/load-testing") => (
-            200,
-            book_page("Load Testing", "load-testing", "/chapter/load-testing", content::chapter_load_testing()),
-        ),
-        ("GET", "/chapter/planning") => (
-            200,
-            book_page("Planning", "planning", "/chapter/planning", content::chapter_planning()),
-        ),
-        ("GET", "/chapter/degradation") => (
-            200,
-            book_page("Degradation", "degradation", "/chapter/degradation", content::chapter_degradation()),
-        ),
-        ("GET", "/chapter/load-balancing") => (
-            200,
-            book_page("Load Balancing", "load-balancing", "/chapter/load-balancing", content::chapter_load_balancing()),
-        ),
-        ("GET", "/chapter/consistency") => (
-            200,
-            book_page("Consistency", "consistency", "/chapter/consistency", content::chapter_consistency()),
-        ),
-        ("GET", "/chapter/placement") => (
-            200,
-            book_page("Placement", "placement", "/chapter/placement", content::chapter_placement()),
-        ),
-        ("GET", "/chapter/geo-replication") => (
-            200,
-            book_page("Geo Replication", "geo-replication", "/chapter/geo-replication", content::chapter_geo_replication()),
-        ),
-        ("GET", "/chapter/traffic") => (
-            200,
-            book_page("Traffic", "traffic", "/chapter/traffic", content::chapter_traffic()),
-        ),
-        ("GET", "/chapter/faults") => (
-            200,
-            book_page("Faults", "faults", "/chapter/faults", content::chapter_faults()),
-        ),
-        ("GET", "/chapter/outages") => (
-            200,
-            book_page("Outages", "outages", "/chapter/outages", content::chapter_outages()),
-        ),
-        ("GET", "/chapter/resources") => (
-            200,
-            book_page("Resources", "resources", "/chapter/resources", content::chapter_resources()),
-        ),
-        ("GET", "/chapter/servers") => (
-            200,
-            book_page("Servers", "servers", "/chapter/servers", content::chapter_servers()),
-        ),
-        ("GET", "/chapter/buildings") => (
-            200,
-            book_page("Buildings", "buildings", "/chapter/buildings", content::chapter_buildings()),
-        ),
-        ("GET", "/chapter/network") => (
-            200,
-            book_page("Network", "network", "/chapter/network", content::chapter_network()),
-        ),
-        ("GET", "/chapter/power") => (
-            200,
-            book_page("Power", "power", "/chapter/power", content::chapter_power()),
-        ),
-        ("GET", "/chapter/infra-management") => (
-            200,
-            book_page("Management", "infra-management", "/chapter/infra-management", content::chapter_infra_management()),
-        ),
-        ("GET", "/chapter/maintenance") => (
-            200,
-            book_page("Maintenance", "maintenance", "/chapter/maintenance", content::chapter_maintenance()),
-        ),
-        ("GET", "/chapter/edges") => (
-            200,
-            book_page("Edges", "edges", "/chapter/edges", content::chapter_edges()),
-        ),
-        ("GET", "/chapter/site-events") => (
-            200,
-            book_page("Site Events", "site-events", "/chapter/site-events", content::chapter_site_events()),
-        ),
-        ("GET", "/chapter/detection") => (
-            200,
-            book_page("Detection", "detection", "/chapter/detection", content::chapter_detection()),
-        ),
-        ("GET", "/chapter/escalation") => (
-            200,
-            book_page("Escalation", "escalation", "/chapter/escalation", content::chapter_escalation()),
-        ),
-        ("GET", "/chapter/root-causes") => (
-            200,
-            book_page("Root Causes", "root-causes", "/chapter/root-causes", content::chapter_root_causes()),
-        ),
-        ("GET", "/chapter/remediation") => (
-            200,
-            book_page("Remediation", "remediation", "/chapter/remediation", content::chapter_remediation()),
-        ),
-        ("GET", "/chapter/prevention") => (
-            200,
-            book_page("Prevention", "prevention", "/chapter/prevention", content::chapter_prevention()),
-        ),
-        ("GET", "/chapter/communication") => (
-            200,
-            book_page("Communication", "communication", "/chapter/communication", content::chapter_communication()),
-        ),
-        ("GET", "/afterword") => (
-            200,
-            book_page("Afterword", "afterword", "/afterword", content::afterword()),
-        ),
-        ("GET", "/colophon") => (
-            200,
-            book_page("Colophon", "colophon", "/colophon", content::colophon()),
-        ),
+    // Detect language from URL prefix, cookie, or Accept-Language
+    let (lang, stripped_path) = detect_lang(base_path, headers);
 
+    // Set lang cookie when serving /ja/ pages
+    if lang == Lang::Ja && base_path.starts_with("/ja") {
+        cookies.push("lang=ja; Path=/; Max-Age=31536000".to_string());
+    }
+
+    // Try PAGES table for book content
+    if method == "GET" {
+        if stripped_path == "/" {
+            return (200, landing_page(lang), cookies);
+        }
+        if let Some(page) = PAGES.iter().find(|p| p.href == stripped_path) {
+            let title = match lang {
+                Lang::En => page.title_en,
+                Lang::Ja => page.title_ja,
+            };
+            let content = content_for(lang, page.slug);
+            let html = book_page(title, page.slug, page.href, content, lang);
+            return (200, html, cookies);
+        }
+    }
+
+    let (status, html) = match (method, stripped_path) {
         // ── Highlight API ──
         ("GET", "/api/highlights") => {
             let page = query.get("page").map(|s| s.as_str()).unwrap_or("");
@@ -3048,6 +3213,7 @@ async fn handle_request(
                 "",
                 "",
                 "<h1>Not Found</h1><p>The page you requested does not exist.</p>",
+                lang,
             ),
         ),
     };
