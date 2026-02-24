@@ -170,13 +170,18 @@ fn detect_lang<'a>(path: &'a str, headers: &str) -> (Lang, &'a str) {
     if path == "/ja" {
         return (Lang::Ja, "/");
     }
-    if let Some(lang_val) = parse_cookie(headers, "lang") {
-        if lang_val == "ja" {
-            return (Lang::Ja, path);
+    // Cookie and Accept-Language only influence the landing page.
+    // For all other paths, no /ja/ prefix means English.
+    if path == "/" {
+        if let Some(lang_val) = parse_cookie(headers, "lang") {
+            if lang_val == "ja" {
+                return (Lang::Ja, path);
+            }
         }
+        let lang = parse_accept_language(headers);
+        return (lang, path);
     }
-    let lang = parse_accept_language(headers);
-    (lang, path)
+    (Lang::En, path)
 }
 
 fn parse_accept_language(headers: &str) -> Lang {
@@ -3029,10 +3034,11 @@ async fn handle_request(
     // Detect language from URL prefix, cookie, or Accept-Language
     let (lang, stripped_path) = detect_lang(base_path, headers);
 
-    // Set lang cookie so preference persists across visits
-    if lang == Lang::Ja && base_path.starts_with("/ja") {
+    // Set lang cookie when user explicitly chooses a language via URL
+    if base_path.starts_with("/ja") {
         cookies.push("lang=ja; Path=/; Max-Age=31536000".to_string());
-    } else if lang == Lang::En && !base_path.starts_with("/ja") {
+    } else if base_path != "/" {
+        // Non-root English path: clear any Japanese cookie
         cookies.push("lang=en; Path=/; Max-Age=31536000".to_string());
     }
 
