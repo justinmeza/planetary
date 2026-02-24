@@ -2133,19 +2133,24 @@ pub fn chapter_localization() -> &'static str {
         return (Lang::Ja, "/");
     }
 
-    // 2. Cookie: lang=ja (persisted preference)
-    if let Some(lang) = parse_cookie(headers, "lang") {
-        if lang == "ja" {
-            return (Lang::Ja, path);
+    // 2. For the landing page only: cookie, then Accept-Language
+    if path == "/" {
+        if let Some(lang) = parse_cookie(headers, "lang") {
+            if lang == "ja" {
+                return (Lang::Ja, path);
+            }
         }
+        let lang = parse_accept_language(headers);
+        return (lang, path);
     }
 
-    // 3. Accept-Language header: ja vs en quality values
-    let lang = parse_accept_language(headers);
-    (lang, path)
+    // 3. All other paths: no /ja/ prefix means English
+    (Lang::En, path)
 }</code></pre>
 
-<p>チェーンは原則に従います：<strong>明示的な選択が暗黙的なシグナルを上書きする</strong>。URLプレフィックスが最も明示的です&mdash;&mdash;ユーザーが特定の言語のリンクをクリックしました。クッキーは以前の明示的な選択を記録します。<code>Accept-Language</code>ヘッダーはユーザーが意識的に設定していないかもしれないブラウザレベルのデフォルトです。</p>
+<p>チェーンは原則に従います：<strong>URLが真実の情報源である</strong>。<code>/ja/</code>プレフィックスは明示的な選択です&mdash;&mdash;ユーザーが特定の言語のリンクをクリックしました。<code>/chapter/systems</code>のようなプレフィックスのないパスでは、クッキーやブラウザ設定に関係なく、言語は常に英語です。これにより言語スイッチャーが確実に動作します：日本語ページで「English」をクリックすると、必ず英語ページが表示されます。</p>
+
+<p>唯一の例外はランディングページ（<code>/</code>）で、コンテンツパスによる区別ができません。ここでは<code>lang</code>クッキー（以前の明示的な言語選択により設定）を確認し、ブラウザの<code>Accept-Language</code>ヘッダーにフォールバックします。</p>
 
 <h2>コンテンツモジュール構造</h2>
 

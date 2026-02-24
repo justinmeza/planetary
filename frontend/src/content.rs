@@ -4430,23 +4430,32 @@ order:</p>
         return (Lang::Ja, "/");
     }
 
-    // 2. Cookie: lang=ja (persisted preference)
-    if let Some(lang) = parse_cookie(headers, "lang") {
-        if lang == "ja" {
-            return (Lang::Ja, path);
+    // 2. For the landing page only: cookie, then Accept-Language
+    if path == "/" {
+        if let Some(lang) = parse_cookie(headers, "lang") {
+            if lang == "ja" {
+                return (Lang::Ja, path);
+            }
         }
+        let lang = parse_accept_language(headers);
+        return (lang, path);
     }
 
-    // 3. Accept-Language header: ja vs en quality values
-    let lang = parse_accept_language(headers);
-    (lang, path)
+    // 3. All other paths: no /ja/ prefix means English
+    (Lang::En, path)
 }</code></pre>
 
-<p>The chain follows a principle: <strong>explicit choices override implicit
-signals</strong>.  A URL prefix is the most explicit &mdash; the user clicked
-a link in a specific language.  A cookie records a previous explicit choice.
-The <code>Accept-Language</code> header is a browser-level default that the user
-may not have consciously configured.</p>
+<p>The chain follows a principle: <strong>the URL is the source of truth</strong>.
+A <code>/ja/</code> prefix is an explicit choice &mdash; the user clicked a link
+in a specific language.  For non-prefixed paths like <code>/chapter/systems</code>,
+the language is always English, regardless of cookies or browser settings.  This
+ensures the language switcher works reliably: clicking &ldquo;English&rdquo; on
+a Japanese page always produces an English page.</p>
+
+<p>The one exception is the landing page (<code>/</code>), where there is no
+content path to disambiguate.  Here we check the <code>lang</code> cookie
+(set by a previous explicit language choice) and fall back to the browser&rsquo;s
+<code>Accept-Language</code> header.</p>
 
 <h2>URL-Based Routing</h2>
 
@@ -4538,14 +4547,20 @@ let switch_label = match lang {
 
 <p>First, the URL changes to include (or remove) the <code>/ja/</code> prefix,
 so the browser navigates to the translated page.  Second, a
-<code>lang</code> cookie is set so that subsequent visits to the root URL
-(<code>/</code>) will automatically serve the preferred language:</p>
+<code>lang</code> cookie is set to record the preference:</p>
 
-<pre class="code-loadbalancer"><code>Set-Cookie: lang=ja; Path=/; Max-Age=31536000</code></pre>
+<pre class="code-loadbalancer"><code>// Visiting /ja/... sets the Japanese preference
+Set-Cookie: lang=ja; Path=/; Max-Age=31536000
 
-<p>This means a Japanese reader who visits <code>p.jjm.net</code> directly will
-see the Japanese landing page on their next visit, without needing to navigate
-to <code>/ja/</code> first.  The cookie persists for one year.</p>
+// Visiting any non-prefixed book page clears it
+Set-Cookie: lang=en; Path=/; Max-Age=31536000</code></pre>
+
+<p>The cookie only influences the landing page (<code>/</code>).  For all other
+pages, the URL prefix (or its absence) is the sole authority on language.  This
+means a Japanese reader who visits <code>p.jjm.net</code> directly will see the
+Japanese landing page on their next visit, without needing to navigate to
+<code>/ja/</code> first.  But clicking &ldquo;English&rdquo; on any page always
+takes them to English, regardless of the cookie.</p>
 
 <div style="background: var(--sidenote-bg); border: 1px solid var(--sidenote-border); border-radius: 6px; padding: 16px 20px; margin: 24px 0;">
 <strong>Try it now:</strong> Click <strong>日本語</strong> in the sidebar to see
@@ -4556,7 +4571,7 @@ Japanese.  Click <strong>English</strong> to switch back.
 
 <h2>Accept-Language Parsing</h2>
 
-<p>When no URL prefix or cookie is present, we fall back to the browser's
+<p>On the landing page, when no cookie is present, we fall back to the browser's
 <code>Accept-Language</code> header.  This header contains a comma-separated
 list of language tags with optional quality values:</p>
 
