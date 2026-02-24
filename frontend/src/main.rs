@@ -3029,9 +3029,11 @@ async fn handle_request(
     // Detect language from URL prefix, cookie, or Accept-Language
     let (lang, stripped_path) = detect_lang(base_path, headers);
 
-    // Set lang cookie when serving /ja/ pages
+    // Set lang cookie so preference persists across visits
     if lang == Lang::Ja && base_path.starts_with("/ja") {
         cookies.push("lang=ja; Path=/; Max-Age=31536000".to_string());
+    } else if lang == Lang::En && !base_path.starts_with("/ja") {
+        cookies.push("lang=en; Path=/; Max-Age=31536000".to_string());
     }
 
     // Try PAGES table for book content
